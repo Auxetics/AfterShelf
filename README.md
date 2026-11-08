@@ -10,9 +10,10 @@ An experimental desktop library for games distributed through F95 and LewdCorner
 
 GitHub Actions builds **macOS Apple Silicon (ARM64), macOS Intel (x64), and Windows Intel/AMD (x64)** on every push to `main`, pull request and manual workflow run. Download the architecture-specific packages from [Actions](https://github.com/Auxetics/AfterShelf/actions). Version tags matching `package.json` publish a GitHub prerelease after all three builds succeed.
 
-- macOS: DMG and ZIP application packages.
-- Windows: Web Setup plus its separate application payload, and a directly usable ZIP package. Web Setup downloads the payload from the corresponding GitHub release; it does not contain the full runtime. For untagged build artifacts, use the ZIP until the matching release is published.
-- These alpha packages are not signed with a publisher certificate or notarized. Automatic application self-updates are not implemented yet.
+- macOS: Lightweight Web Setup `.pkg` / `.dmg` bootstrap installers plus their separate `.zip` application payload (with `.sha256` checksum), which can also be used directly.
+- Windows: Lightweight Web Setup `.exe` bootstrap installer plus its separate `.7z` application payload, and a directly usable `.zip` package.
+- Both Web Setup installers check system requirements/architecture and download their runtime payload from the corresponding GitHub release during installation instead of pre-packaging the full runtime in the installer itself. For untagged build artifacts, use the `.zip` package until the matching release is published.
+- These alpha packages are not signed with a publisher certificate or notarized. At launch, AfterShelf checks GitHub Releases for newer versions, downloads the update in the background, and displays a top-bar restart button once ready (blocked while any downloads, game updates, syncs or scans are active).
 
 ## Using AfterShelf
 
@@ -54,7 +55,7 @@ npm run dist:mac
 npm run dist:win
 ```
 
-The GitHub matrix builds each architecture separately on a matching host and uploads its packages. Publishing a `v<package version>` tag triggers the prerelease job. Publisher signing/notarization is a separate distribution task.
+The GitHub matrix builds each architecture separately on a matching host and stages its packages into the `0.*-Alpha` draft release on GitHub. Publisher signing/notarization is a separate distribution task.
 
 ## Privacy and local files
 

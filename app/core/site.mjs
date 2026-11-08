@@ -1,5 +1,5 @@
 import * as cheerio from 'cheerio';
-import { detectEngine, normalizedTitle, normalizeVersion } from './model.mjs';
+import { detectEngine, normalizeVersion } from './model.mjs';
 import { siteOrigin, threadReference } from './site-url.mjs';
 export { siteOrigin, threadReference } from './site-url.mjs';
 
@@ -105,19 +105,6 @@ export function parseLatestHtml(html, origin) {
   });
   if (!entries.size && !/no (?:games|threads|results|items)|nothing (?:found|to show)/i.test((scope.length ? scope : $('body')).text())) throw new Error('No game thread listing was recognised. Check this source’s latest-updates URL and feed format in Settings.');
   return [...entries.values()];
-}
-export function latestPerThread(rows) {
-  const latest = new Map();
-  for (const row of rows) {
-    const previous = latest.get(row.threadId);
-    if (!previous || row.timestamp > previous.timestamp) latest.set(row.threadId, row);
-  }
-  return [...latest.values()];
-}
-export function matchExitTitle(title, games, origin) {
-  const normalized = normalizedTitle(title);
-  const matches = games.filter(game => game.origin === origin && normalizedTitle(game.title) === normalized);
-  return matches.length === 1 ? matches[0].id : null;
 }
 export function hostMatches(host, domain) { return host === domain || host.endsWith(`.${domain}`); }
 export function popupAllowed(url, site) {

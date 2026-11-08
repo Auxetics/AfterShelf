@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { Store } from './core/store.mjs';
 import { newGame, gameKey, ENGINES, ACTIVE_DOWNLOADS, canInstallArchive, offerInstallation, canLaunchGame, normalizedTitle } from './core/model.mjs';
-import { parseThread, siteOrigin, threadReference } from './core/site.mjs';
+import { parseThread } from './core/site.mjs';
 import { safeName, exists, realDirectory, isInside, walk, assertNoLinks } from './core/files.mjs';
 import { savePlan, inspectInstallation, transferSaves } from './core/saves.mjs';
 import { extractZip } from './core/archive.mjs';
@@ -27,6 +27,7 @@ import { sessionResponse } from './core/session-response.mjs';
 import { checkAllSourceUpdates } from './core/update-checker.mjs';
 import { APP_NAME, profileDirectory, syncDockBadge } from './core/desktop.mjs';
 import { sourceById, sourceForUrl, sourceThreadReference, sourceId, updateSourceSettings, checkSourceStatus } from './core/sources.mjs';
+import { AppUpdater, restartBlockReason } from './core/app-updater.mjs';
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const uiFile = path.join(directory, 'ui', 'index.html');
@@ -36,12 +37,22 @@ app.setName(APP_NAME);
 app.setPath('userData', profile);
 app.setPath('sessionData', profile);
 app.enableSandbox();
-let window, store, browser, quitConfirmed = false, interval, closingForFlush = false;
+let window, store, browser, appUpdater, quitConfirmed = false, interval, closingForFlush = false;
 let libraryScanController;
 const activeItems = new Map(), operations = new Map();
 const detailOperations = new Set();
 let metadataRequests = Promise.resolve(), nextMetadataRequest = 0;
-const notify = () => { syncDockBadge(app, store.data.games); if (window && !window.isDestroyed()) window.webContents.send('library:state', store.snapshot()); };
+const currentRuntime = () => ({
+  version: app.getVersion(),
+  platform: process.platform,
+  arch: process.arch,
+  activeDownloads: activeItems.size,
+  activeInstallations: operations.size,
+  activeDetailScans: detailOperations.size,
+  activeLibraryScan: Boolean(libraryScanController),
+  appUpdate: appUpdater ? appUpdater.snapshot() : { status: 'idle', version: '', received: 0, total: 0, percent: 0 }
+});
+const notify = () => { syncDockBadge(app, store.data.games); if (window && !window.isDestroyed()) window.webContents.send('library:state', { ...store.snapshot(), runtime: currentRuntime() }); };
 const getGame = id => { const game = store.data.games.find(game => game.id === id); if (!game) throw new Error('Game no longer exists in the library.'); return game; };
 const getJob = id => { const job = store.data.downloads.find(job => job.id === id); if (!job) throw new Error('Download no longer exists.'); return job; };
 const updateJob = (id, changes) => store.update(state => { const job = state.downloads.find(item => item.id === id); if (job) Object.assign(job, changes); });
@@ -96,7 +107,7 @@ async function refreshLocalDetails(id) {
 }
 async function refreshDetails(id) {
   if (detailOperations.has(id)) throw new Error('Details are already being scanned for this game.');
-  detailOperations.add(id);
+  detailOperations.add(id); notify();
   try {
     await refreshLocalDetails(id);
     const game = getGame(id);
@@ -106,7 +117,7 @@ async function refreshDetails(id) {
       if (metadata.coverError) await store.log('Cover needs attention', metadata.coverError);
     }
     return { linked: Boolean(game.threadUrl), version: getGame(id).installedVersion, coverError: getGame(id).coverError || '' };
-  } finally { detailOperations.delete(id); }
+  } finally { detailOperations.delete(id); notify(); }
 }
 async function scanLibrary({ startup = false } = {}) {
   if (store.data.libraryScan.active) throw new Error('A folder scan is already running.');
@@ -359,7 +370,15 @@ async function captureDownload(item, sourceGameId, thread) {
 async function checkUpdates(full = false) { return checkAllSourceUpdates({ store, clientForSource: site => metadataClient(site), full }); }
 
 const actions = {
-  snapshot: () => ({ ...store.snapshot(), runtime: { version: app.getVersion(), platform: process.platform, arch: process.arch, activeInstallations: operations.size }, browser: browser.state() }),
+  snapshot: () => ({ ...store.snapshot(), runtime: currentRuntime(), browser: browser.state() }),
+  'apply-app-update': async () => {
+    if (!appUpdater) throw new Error('Application updater is not initialized.');
+    const result = await appUpdater.applyOnRestart();
+    await store.flush();
+    quitConfirmed = true;
+    app.quit();
+    return result;
+  },
   'choose-root': async () => { const root = await chooseFolder('Choose your games and downloads folder'); if (root) await store.update(state => { state.settings.gamesRoot = root; }); return root; },
   'choose-extractor': async () => {
     const result = await dialog.showOpenDialog(window, { title: 'Select your extraction application', defaultPath: process.platform === 'darwin' ? '/Applications' : undefined, properties: ['openFile', 'openDirectory'] });
@@ -387,12 +406,8 @@ const actions = {
     return { imported };
   },
   'save-settings': async input => {
-    const minutes = Math.min(120, Math.max(5, Number(input.intervalMinutes) || 15));
-    const origin = input.origin ? siteOrigin(input.origin) : null, latestPath = text(input.latestPath);
-    if (origin && (!latestPath.startsWith('/') || latestPath.startsWith('//') || latestPath.length > 1500)) throw new Error('Use a site-relative update endpoint.');
     await store.update(state => {
-      if (origin) { state.settings.site = { ...state.settings.site, origin, name: origin.includes('f95zone') ? 'F95zone' : new URL(origin).hostname, latestPath }; state.settings.sources[sourceId(state.settings.site)] = { ...state.settings.site }; }
-      state.settings.intervalMinutes = minutes;
+      if (input.intervalMinutes != null) state.settings.intervalMinutes = Math.min(120, Math.max(5, Number(input.intervalMinutes) || 15));
       if (['keep', 'previous', 'delete'].includes(input.retention)) state.settings.retention = input.retention;
       if (['dark', 'light'].includes(input.theme)) state.settings.theme = input.theme;
       if (['download-only', 'assisted'].includes(input.downloadMode)) state.settings.downloadMode = input.downloadMode;
@@ -540,7 +555,7 @@ async function start() {
   await store.open();
   for (const job of store.data.downloads) if (['failed', 'cancelled'].includes(job.status)) await cleanupPartial(job.id);
   syncDockBadge(app, store.data.games);
-  const icon = path.join(directory, 'assets', 'aftershelf-1024.png');
+  const icon = path.join(directory, 'assets', 'aftershelf-256.png');
   if (process.platform === 'darwin') app.dock.setIcon(nativeImage.createFromPath(icon));
   window = new BrowserWindow({ title: APP_NAME, icon, width: 1360, height: 900, minWidth: 1000, minHeight: 700, backgroundColor: '#171b22', show: false,
     webPreferences: { preload: path.join(directory, 'preload.cjs'), sandbox: true, contextIsolation: true, nodeIntegration: false, webSecurity: true } });
@@ -592,6 +607,14 @@ async function start() {
     for (const game of [...store.data.games]) if (canLaunchGame(game)) { try { await refreshLocalDetails(game.id); } catch (error) { await store.log('Local metadata needs attention', error.message); } }
   })().catch(error => store.log('Startup library scan needs attention', error.message));
   scheduleChecks();
+  appUpdater = new AppUpdater({
+    currentVersion: app.getVersion(),
+    userDataDir: app.getPath('userData'),
+    getBlockReason: () => restartBlockReason(store.data, currentRuntime()),
+    onChange: notify,
+    onLog: (message, details) => store.log(message, details)
+  });
+  void appUpdater.checkForUpdates();
   await store.log('Application started', `${app.getVersion()} ${process.platform} ${process.arch}`);
 }
 if (!app.requestSingleInstanceLock()) app.quit();

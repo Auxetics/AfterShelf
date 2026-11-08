@@ -1,6 +1,7 @@
 import { ENGINES, ENGINE_NAMES, hasUpdate, canInstallArchive, versionKnown, versionRelation, isInstalled, canLaunchGame } from '../core/model.mjs';
 import { archiveTitle } from '../core/archive-names.mjs';
 import { configuredSources, sourceLabel, sourceId, sourceById } from '../core/sources.mjs';
+import { displayAppVersion, restartBlockReason } from '../core/app-updater.mjs';
 
 const icons = {
   library: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
@@ -27,6 +28,7 @@ const icons = {
 };
 const icon = name => `<svg viewBox="0 0 24 24" aria-hidden="true">${icons[name] || icons.info}</svg>`;
 const e = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[char]);
+const displayVersion = displayAppVersion;
 const $ = selector => document.querySelector(selector);
 let state, runtime, browserState = { activeId: null, tabs: [] }, page = 'library', filter = 'all', search = '', view = localStorage.getItem('view') || 'grid', modalSubmit, toastTimer;
 let setup;
@@ -48,7 +50,7 @@ function pageActions(actions) { return actions ? `<div class="page-actions">${ac
 function empty(title, description, name, actions = '') { return `<div class="empty-state"><div class="empty-icon">${icon(name)}</div><h2>${title}</h2><p>${description}</p><div class="empty-actions">${actions}</div></div>`; }
 function counts() { return { all: state.games.length, installed: state.games.filter(isInstalled).length, ready: state.games.filter(canLaunchGame).length, updates: state.games.filter(game => isInstalled(game) && hasUpdate(game)).length, uninstalled: state.games.filter(game => !isInstalled(game)).length }; }
 function status(game) { if(game.availability?.status==='missing')return '<span class="badge">Not installed</span>';if(['offline','unreadable'].includes(game.availability?.status))return '<span class="badge">Files unavailable</span>';const relation=versionRelation(game.installedVersion,game.latestVersion);return relation==='newer'?'<span class="badge update">Update available</span>':relation==='different'?'<span class="badge update">Version differs</span>':game.installation?`<span class="badge installed">${relation==='older'?'Installed version ahead':'Installed'}</span>`:'<span class="badge">Not installed</span>'; }
-function gameImage(game) { const value=game.cover||game.localIcon||'';return /^data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(value)?value:''; }
+function gameImage(game) { const value=game.cover||'';return /^data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(value)?value:''; }
 function versionLabel(game) { return `${game.installation?(game.availability?.status==='missing'?'Last installed ':'Installed ')+(versionKnown(game.installedVersion)?game.installedVersion:'unknown')+(game.installationCheck?.status==='unverified'?' (unverified)':'')+' · ':''}Forum ${versionKnown(game.latestVersion)?game.latestVersion:game.threadId?'unknown':'not linked'}`; }
 function gameCard(game) {
   const id = e(game.id), title = e(game.title), initial = e(game.title.replace(/[^\p{L}\p{N}\s]/gu,'').split(/\s+/).slice(0,2).map(x=>x[0]).join('').toUpperCase());
@@ -57,7 +59,7 @@ function gameCard(game) {
   const finish = download?.status === 'awaiting-folder' || Boolean(download?.extractedPath);
   const action = playable ? 'play' : download && !isInstalled(game) ? 'install-zip' : game.installation ? 'register-game' : download ? 'install-zip' : game.threadUrl ? 'open-game' : 'game-details';
   const actions = button(action, playable ? 'Play' : action==='install-zip' ? finish ? 'Finish installation' : 'Install game' : game.installation ? game.availability?.status==='missing'?'Locate game':'Locate launch file' : download ? finish ? 'Finish installation' : 'Install game' : game.threadUrl ? 'Open thread' : 'Game details', playable ? 'play' : 'arrow', `data-id="${action==='install-zip'?e(download.id):id}"`, playable||Boolean(download)) + (!game.threadId?`<button class="icon-button" data-action="find-forum-game" data-id="${id}" aria-label="Find forum match for ${title}" title="Find forum details">${icon('search')}</button>`:'') + `<button class="icon-button" data-action="game-details" data-id="${id}" aria-label="Manage ${title}">${icon('more')}</button>`;
-  const image=gameImage(game), art=image?`<img class="${game.cover?'cover-image':'local-icon'}" src="${e(image)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">`:'';
+  const image=gameImage(game), art=image?`<img class="cover-image" src="${e(image)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">`:'';
   if (view === 'list') return `<article class="game-row"><div class="mini-art">${initial}${art}</div><div class="game-row-info"><h3 data-action="open-game" data-id="${id}">${title}</h3><p>${sourceBadge(game)} ${e(ENGINE_NAMES[game.engine] || 'Other')} · ${e(versionLabel(game))}</p></div>${status(game)}${actions}</article>`;
   return `<article class="game-card"><div class="game-art" data-action="open-game" data-id="${id}">${status(game)}<span class="monogram">${initial}</span>${art}</div><div class="game-info"><h3 data-action="open-game" data-id="${id}">${title}</h3><div class="game-meta"><span>${e(ENGINE_NAMES[game.engine])}</span>${sourceBadge(game)}${game.creator?`<span>${e(game.creator)}</span>`:''}</div><p class="version-details">${e(versionLabel(game))}</p><div class="game-actions">${actions}</div></div></article>`;
 }
@@ -72,7 +74,7 @@ function renderLibrary() {
     (!state.settings.setupCompleted ? `<div class="onboarding">${icon('folder')}<div><strong>Finish setting up your library.</strong><p>Choose a games folder, download behaviour, and optionally find your existing games.</p></div>${button('setup','Set up library','arrow')}</div>` : '');
 }
 function renderBrowse() {
-  content.innerHTML = `<div class="browser-shell"><div class="browser-tabbar"><div id="browser-tabs" class="browser-tabs" role="tablist" aria-label="Browser tabs"></div><button type="button" class="icon-button new-tab" data-action="browser-new-tab" aria-label="New tab" title="New tab">${icon('plus')}</button></div><div class="browser-toolbar"><button type="button" class="icon-button" data-action="browser-back" aria-label="Back" title="Back">${icon('back')}</button><button type="button" class="icon-button" data-action="browser-forward" aria-label="Forward" title="Forward">${icon('forward')}</button><button type="button" class="icon-button" data-action="browser-reload" aria-label="Reload" title="Reload">${icon('refresh')}</button><button type="button" class="icon-button" data-action="browser-home" aria-label="Forum home" title="Forum home">${icon('globe')}</button><span class="browser-toolbar-spacer"></span>${sourceShortcuts()}${button('add-current','Add this thread','plus','',true)}</div><div id="browser-error" class="browser-error" role="status" hidden></div><div id="browser-slot" class="browser-slot"></div></div>`;
+  content.innerHTML = `<div class="browser-shell"><div class="browser-tabbar"><div id="browser-tabs" class="browser-tabs" role="tablist" aria-label="Browser tabs"></div><button type="button" class="icon-button new-tab" data-action="browser-new-tab" aria-label="New tab" title="New tab">${icon('plus')}</button></div><div class="browser-toolbar"><button type="button" class="icon-button" data-action="browser-back" aria-label="Back" title="Back">${icon('back')}</button><button type="button" class="icon-button" data-action="browser-forward" aria-label="Forward" title="Forward">${icon('forward')}</button><button type="button" class="icon-button" data-action="browser-reload" aria-label="Reload" title="Reload">${icon('refresh')}</button><button type="button" class="icon-button" data-action="browser-home" aria-label="Forum home" title="Forum home">${icon('globe')}</button><span class="browser-toolbar-spacer"></span><button type="button" class="app-update-chip" data-app-update-chip data-action="apply-app-update" hidden></button>${sourceShortcuts()}${button('add-current','Add this thread','plus','',true)}</div><div id="browser-error" class="browser-error" role="status" hidden></div><div id="browser-slot" class="browser-slot"></div></div>`;
   renderBrowserState();
 }
 function renderBrowserState() {
@@ -144,6 +146,33 @@ function renderSourceStatus() {
     chip.title=`${site.name}: ${message}${!status?.active&&status?.checkedAt?' · Checked '+time(status.checkedAt):''}`;
     chip.setAttribute('aria-label',`${site.name}: ${message} Open ${site.name}.`);
   }
+  const appUpdate=runtime?.appUpdate;
+  for(const updateBtn of document.querySelectorAll('[data-app-update-chip]')){
+    if(appUpdate?.status==='downloading'){
+      const pct=appUpdate.percent>0?` ${appUpdate.percent}%`:'…';
+      updateBtn.hidden=false;
+      updateBtn.disabled=true;
+      updateBtn.dataset.status='downloading';
+      updateBtn.innerHTML=`<span class="spinning">${icon('refresh')}</span><span>Downloading ${e(appUpdate.version)}${pct}</span>`;
+      updateBtn.title=`Downloading AfterShelf ${appUpdate.version} in the background…`;
+    }else if(appUpdate?.status==='ready'){
+      const blocked=restartBlockReason(state,runtime);
+      updateBtn.hidden=false;
+      updateBtn.disabled=Boolean(blocked);
+      updateBtn.dataset.status=blocked?'blocked':'ready';
+      updateBtn.innerHTML=`${icon('download')}<span>Restart to update (${e(appUpdate.version)})</span>`;
+      updateBtn.title=blocked||`Restart AfterShelf to apply update ${appUpdate.version}`;
+    }else if(appUpdate?.status==='restarting'){
+      updateBtn.hidden=false;
+      updateBtn.disabled=true;
+      updateBtn.dataset.status='restarting';
+      updateBtn.innerHTML=`<span class="spinning">${icon('refresh')}</span><span>Restarting…</span>`;
+      updateBtn.title='Restarting AfterShelf to apply update…';
+    }else{
+      updateBtn.hidden=true;
+      updateBtn.innerHTML='';
+    }
+  }
 }
 function sourceSettings() {
   return configuredSources(state.settings).map(site=>{
@@ -152,9 +181,9 @@ function sourceSettings() {
   }).join('');
 }
 function renderSettings() {
-  content.innerHTML = `<div class="settings-grid"><section class="panel"><h2>Games & downloads</h2><p>Downloads, extraction, and folder selection start in your chosen games directory.</p><div class="path-picker">${icon('folder')}<span class="path-value">${e(state.settings.gamesRoot||'No games folder selected')}</span>${button('choose-root','Choose folder',null)}</div><label class="field"><span>External extraction application</span></label><div class="path-picker">${icon('file')}<span class="path-value">${e(state.settings.extractor||'Use the system’s default app for external extraction')}</span>${button('choose-extractor','Choose app',null)}</div><p class="helper">Install handles ordinary ZIP releases automatically. Use this app for other formats, passwords or multipart archives; select its output if it cannot report completion.</p><div class="download-actions">${button('setup','Run setup again','settings')}${button('scan-folder','Find existing games','search')}</div></section>
+  content.innerHTML = `<div class="settings-grid"><section class="panel"><h2>Games & downloads</h2><p>Downloads, extraction, and folder selection start in your chosen games directory.</p><div class="path-picker">${icon('folder')}<span class="path-value">${e(state.settings.gamesRoot||'No games folder selected')}</span>${button('choose-root','Choose folder',null)}</div><label class="field"><span>External extraction application</span></label><div class="path-picker">${icon('file')}<span class="path-value">${e(state.settings.extractor||'Use the system’s default app for external extraction')}</span>${state.settings.extractor?button('reset-extractor','Use default',null):''}${button('choose-extractor','Choose app',null)}</div><p class="helper">Install handles ordinary ZIP releases automatically. Use this app for other formats, passwords or multipart archives; select its output if it cannot report completion.</p><div class="download-actions">${button('setup','Run setup again','settings')}${button('scan-folder','Find existing games','search')}</div></section>
     <form id="settings-form" class="panel"><h2>Forum & preferences</h2><p>Games check their own F95 or LewdCorner source. Browsing another source does not reassign your library.</p><label class="field"><span>Completed downloads</span><select name="downloadMode"><option value="download-only" ${state.settings.downloadMode==='download-only'?'selected':''}>Download only — install manually</option><option value="assisted" ${state.settings.downloadMode==='assisted'?'selected':''}>Offer to install/update after downloading</option></select><small>You choose the provider and start each download. Installation transfers identified saves and preferences.</small></label><div class="field-row"><label class="field"><span>Check while the app is open</span><select name="intervalMinutes">${[5,15,30,60,120].map(n=>`<option value="${n}" ${state.settings.intervalMinutes===n?'selected':''}>Every ${n} minutes</option>`).join('')}</select></label><label class="field"><span>Old versions after an update</span><select name="retention">${[['keep','Keep all old versions'],['previous','Keep the previous version'],['delete','Permanently delete old versions']].map(([id,label])=>`<option value="${id}" ${state.settings.retention===id?'selected':''}>${label}</option>`).join('')}</select></label></div><label class="field"><span>Appearance</span><select name="theme"><option value="dark" ${state.settings.theme==='dark'?'selected':''}>Dark forum style</option><option value="light" ${state.settings.theme==='light'?'selected':''}>Light forum style</option></select></label><p class="helper">Archives are automatically deleted after confirmed installation. Download-only and unconfirmed archives remain available.</p><div class="form-actions"><button class="button primary" type="submit">Save preferences</button></div></form>
-    ${sourceSettings()}<section class="panel"><h2>Account & support</h2><p>Sign in on the actual website in Browse. The app keeps your forum session separate from game save data.</p><div class="download-actions">${button('browser-home','Open forum login','globe')}${button('logout','Clear current login',null)}${button('diagnostics-copy','Copy diagnostics','file')}${button('diagnostics-save','Save diagnostics.txt','download')}</div><table class="support-table"><tr><td>Application</td><td>AfterShelf ${e(runtime.version)}</td></tr><tr><td>This device</td><td>${e(runtime.platform)} · ${e(runtime.arch)}</td></tr><tr><td>Engine rules</td><td>Alpha · game validation in progress</td></tr></table></section></div>`;
+    ${sourceSettings()}<section class="panel"><h2>Account & support</h2><p>Sign in on the actual website in Browse. The app keeps your forum session separate from game save data.</p><div class="download-actions">${button('browser-home','Open forum login','globe')}${button('logout','Clear current login',null)}${button('diagnostics-copy','Copy diagnostics','file')}${button('diagnostics-save','Save diagnostics.txt','download')}</div><table class="support-table"><tr><td>Application</td><td>AfterShelf ${e(displayVersion(runtime.version))}</td></tr><tr><td>This device</td><td>${e(runtime.platform)} · ${e(runtime.arch)}</td></tr><tr><td>Engine rules</td><td>Alpha · game validation in progress</td></tr></table></section></div>`;
 }
 function renderActivity() {
   content.innerHTML = pageActions(button('diagnostics-copy','Copy diagnostics','file')+button('diagnostics-save','Save .txt','download'))+
@@ -169,7 +198,7 @@ function render() {
   renderSourceStatus();
   $('#library-count').textContent = state.games.length;
   $('#downloads-count').textContent = state.downloads.filter(job=>job.status!=='installed').length;
-  $('#app-version').textContent = runtime.version.replace('-alpha.1','');
+  $('#app-version').textContent = displayVersion(runtime.version).replace(/-alpha(?:\.\d+)?$/i,'');
   $('#platform-status').textContent = `${runtime.platform==='darwin'?'macOS':'Windows'} · ${runtime.arch}`;
   $('#folder-status').textContent = state.settings.gamesRoot || 'Choose a games folder to get started';
   $('#scan-status').innerHTML = `<span class="${state.scan.active?'spinning':''}">${icon('refresh')}</span><span>${e(state.scan.active?state.scan.message:state.scan.error?'Update check needs attention':state.scan.lastChecked?'Last checked '+time(state.scan.lastChecked):'Not checked yet')}</span>`;
@@ -317,9 +346,10 @@ document.addEventListener('click',event=>{
     if(action==='remove-game'){const result=await api(action,id);if(result?.removed){closeModal();toast(result.message);}return;}
     if(action==='retry-download'){closeModal();await api(action,id);await navigate('browse');return;}
     if(['install-zip','extract-external','select-extracted'].includes(action)){closeModal();await api('install-download',{id,mode:action==='install-zip'?'auto':action==='extract-external'?'external':'folder'});return;}
-    if(action==='download-thread'){const job=state.downloads.find(job=>job.id===id),game=currentGame(job.gameId);await navigate('browse');await api('browser-open',{url:game.threadUrl,gameId:game.id});return;}
+    if(action==='download-thread'){const job=state.downloads.find(job=>job.id===id),game=currentGame(job?.gameId),url=job?.thread?.threadUrl||game?.threadUrl;if(!url)throw new Error('No game thread is linked to this download.');await navigate('browse');await api('browser-open',{url,gameId:game?.id||null});return;}
     if(action==='diagnostics-copy'){await api(action);toast('Diagnostics copied as plain text.');return;}
-    if(action==='remove-game'){await api(action,id);closeModal();return;}
+    if(action==='apply-app-update'){const blocked=restartBlockReason(state,runtime);if(blocked)throw new Error(blocked);await api('apply-app-update');return;}
+    if(action==='reset-extractor'){await api('save-settings',{resetExtractor:true});renderSettings();toast('External extractor reset to system default.');return;}
     await api(action,id); if(['choose-root','choose-extractor'].includes(action)&&page==='settings')renderSettings();
   });
 });
@@ -338,7 +368,7 @@ document.addEventListener('submit',event=>{
 });
 $('#modal').addEventListener('cancel',event=>{if(setup?.running){event.preventDefault();return;}setup=null;$('#modal').classList.remove('setup-dialog');});
 $('#modal').addEventListener('close',()=>requestAnimationFrame(layoutBrowser));
-document.addEventListener('error',event=>{if(event.target instanceof HTMLImageElement&&event.target.matches('.cover-image,.local-icon'))event.target.remove();},true);
+document.addEventListener('error',event=>{if(event.target instanceof HTMLImageElement&&event.target.matches('.cover-image'))event.target.remove();},true);
 window.addEventListener('resize',layoutBrowser);
 document.addEventListener('keydown',event=>{
   if(page!=='browse'||$('#modal').open||!(event.metaKey||event.ctrlKey)||event.altKey)return;
@@ -347,6 +377,7 @@ document.addEventListener('keydown',event=>{
 });
 window.library.onState(next=>{
   state=next;
+  if(next.runtime)runtime=next.runtime;
   if(!runtime)return;
   if(setup?.running&&$('#setup-scan-status'))$('#setup-scan-status').textContent=state.libraryScan?.message||'Looking for games…';
   renderSourceStatus();

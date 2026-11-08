@@ -1,7 +1,7 @@
 {
   "name": "aftershelf",
   "productName": "AfterShelf",
-  "version": "0.1.0-alpha.2",
+  "version": "0.2.0-Alpha",
   "description": "A local desktop game library with forum browsing and save-aware updates.",
   "private": true,
   "type": "module",
@@ -12,7 +12,7 @@
     "check": "node scripts/check.mjs",
     "icons": "node scripts/build-icons.mjs",
     "pack": "electron-builder --dir",
-    "dist:mac": "electron-builder --mac --x64 --arm64",
+    "dist:mac": "electron-builder --mac --x64 --arm64 && node scripts/build-mac-installer.mjs",
     "dist:win": "electron-builder --win --x64"
   },
   "dependencies": {
@@ -26,11 +26,20 @@
   "build": {
     "appId": "com.aftershelf.desktop",
     "productName": "AfterShelf",
+    "compression": "maximum",
     "directories": {
       "output": "release"
     },
     "files": [
       "app/**/*",
+      "!app/assets/aftershelf-master.png",
+      "!app/assets/aftershelf-16.png",
+      "!app/assets/aftershelf-48.png",
+      "!app/assets/aftershelf-128.png",
+      "!app/assets/aftershelf-512.png",
+      "!app/assets/aftershelf-1024.png",
+      "!app/assets/*.icns",
+      "!app/assets/*.ico",
       "package.json"
     ],
     "asar": true,
@@ -38,7 +47,6 @@
       "category": "public.app-category.games",
       "icon": "app/assets/aftershelf.icns",
       "target": [
-        "dmg",
         "zip"
       ],
       "identity": "-",
@@ -53,15 +61,18 @@
     },
     "nsisWeb": {
       "oneClick": false,
-      "allowToChangeInstallationDirectory": true
+      "allowToChangeInstallationDirectory": true,
+      "artifactName": "AfterShelf-Web-Setup-0.2-Alpha-${os}-${arch}.${ext}",
+      "appPackageUrl": "https://github.com/Auxetics/AfterShelf/releases/download/0.2-Alpha/aftershelf-0.2.0-Alpha-x64.nsis.7z"
     },
-    "artifactName": "AfterShelf-${version}-${os}-${arch}.${ext}",
+    "artifactName": "AfterShelf-0.2-Alpha-${os}-${arch}.${ext}",
     "publish": [
       {
         "provider": "github",
         "owner": "Auxetics",
         "repo": "AfterShelf",
-        "releaseType": "prerelease"
+        "vPrefixedTagName": false,
+        "releaseType": "draft"
       }
     ]
   },

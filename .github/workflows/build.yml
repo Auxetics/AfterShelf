@@ -3,14 +3,14 @@ name: Build AfterShelf
 on:
   push:
     branches: [main]
-    tags: ['v*']
+    tags: ['0.*-Alpha', 'v*']
   pull_request:
   workflow_dispatch:
     inputs:
       publish_alpha:
-        description: Upload missing packages to the matching alpha release
+        description: Upload packages to the matching draft alpha release
         type: boolean
-        default: false
+        default: true
 
 permissions:
   contents: read
@@ -53,11 +53,21 @@ jobs:
       - name: Validate release tag
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
-        run: node -e 'const p=require("./package.json"); if(process.env.GITHUB_REF_NAME!=="v"+p.version) throw new Error("Tag must match package.json version")'
+        run: node -e 'const v=require("./package.json").version.replace(/^(\d+\.\d+)\.0(-Alpha.*)$/i,"$1$2"); if(process.env.GITHUB_REF_NAME!==v) throw new Error("Tag must match "+v)'
       - name: Build application packages
+        shell: bash
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
-        run: npx --no-install electron-builder --${{ matrix.platform }} --${{ matrix.arch }} --publish never
+        run: |
+          PKG_VERSION="$(node -p 'require("./package.json").version')"
+          RELEASE_TAG="$(node -p 'require("./package.json").version.replace(/^(\d+\.\d+)\.0(-Alpha.*)$/i, "$1$2")')"
+          npx --no-install electron-builder --${{ matrix.platform }} --${{ matrix.arch }} --publish never \
+            -c.artifactName="AfterShelf-${RELEASE_TAG}-\${os}-\${arch}.\${ext}" \
+            -c.nsisWeb.artifactName="AfterShelf-Web-Setup-${RELEASE_TAG}-\${os}-\${arch}.\${ext}" \
+            -c.nsisWeb.appPackageUrl="https://github.com/${{ github.repository }}/releases/download/${RELEASE_TAG}/aftershelf-${PKG_VERSION}-${{ matrix.arch }}.nsis.7z"
+      - name: Build macOS web setup bootstrap
+        if: matrix.platform == 'mac'
+        run: node scripts/build-mac-installer.mjs --arch ${{ matrix.arch }}
       - name: Upload architecture packages
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -65,8 +75,10 @@ jobs:
           retention-days: 14
           if-no-files-found: error
           path: |
+            release/*.pkg
             release/*.dmg
             release/*.zip
+            release/*.sha256
             release/*.exe
             release/*.7z
             release/*.blockmap
@@ -76,8 +88,8 @@ jobs:
             !release/nsis-web/*__uninstaller.exe
 
   prerelease:
-    name: Publish tagged alpha
-    if: startsWith(github.ref, 'refs/tags/v') || (github.event_name == 'workflow_dispatch' && inputs.publish_alpha)
+    name: Stage draft alpha release
+    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.publish_alpha)
     needs: build
     runs-on: ubuntu-24.04
     permissions:
@@ -91,26 +103,14 @@ jobs:
           pattern: AfterShelf-*
           merge-multiple: true
           path: release
-      - name: Publish prerelease packages
+      - name: Upload draft release packages
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          RELEASE_TAG="v$(node -p "require('./package.json').version")"
-          git diff --quiet "$RELEASE_TAG" HEAD -- app package.json package-lock.json scripts || {
-            echo 'Application sources differ from this version tag. Bump the version and publish a new tag.'
-            exit 1
-          }
+          RELEASE_TAG="$(node -p 'require("./package.json").version.replace(/^(\d+\.\d+)\.0(-Alpha.*)$/i, "$1$2")')"
           if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --title "AfterShelf $RELEASE_TAG" --notes "Experimental alpha for Windows x64, macOS Apple Silicon and macOS Intel. General engine save-transfer profiles are experimental; report compatibility issues with redacted text diagnostics. Windows Web Setup downloads its separate application payload from this release. Mac DMGs contain the app and an Applications shortcut. Packages are not notarized or publisher-signed; application self-updating is not implemented."
+            gh release create "$RELEASE_TAG" --target "${GITHUB_SHA}" --repo "$GITHUB_REPOSITORY" --draft --prerelease --title "$RELEASE_TAG" --notes "It's the initial release."
           fi
-          mapfile -t existing < <(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
           while IFS= read -r -d '' asset; do
-            name="$(basename "$asset")"
-            found=false
-            for previous in "${existing[@]}"; do
-              if [[ "$name" == "$previous" ]]; then found=true; break; fi
-            done
-            if [[ "$found" == false ]]; then
-              gh release upload "$RELEASE_TAG" "$asset" --repo "$GITHUB_REPOSITORY"
-            fi
+            gh release upload "$RELEASE_TAG" "$asset" --clobber --repo "$GITHUB_REPOSITORY"
           done < <(find release -type f -print0)

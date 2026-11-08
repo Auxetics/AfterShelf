@@ -14,8 +14,7 @@ export const DEFAULT_SITE = {
   name: 'F95zone',
   latestPath: '/sam/latest_alpha/latest_data.php?cmd=list&cat=games&page={page}&sort=date&rows=90',
   loginPath: '/login/',
-  blockedHosts: ['doubleclick.net', 'googlesyndication.com', 'popads.net', 'popcash.net', 'exoclick.com'],
-  allowedPopupHosts: []
+  blockedHosts: ['doubleclick.net', 'googlesyndication.com', 'popads.net', 'popcash.net', 'exoclick.com']
 };
 export const DEFAULT_LC_SITE = {
   ...DEFAULT_SITE, id: 'lc', shortName: 'LC', name: 'LewdCorner', origin: 'https://lewdcorner.com',
