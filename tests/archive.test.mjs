@@ -15,7 +15,7 @@ test('ZIP extraction handles a wrapper folder, preserves launch permissions, and
   const {archive,dest}=await fixture(t,[['NewGame/game/script.rpy','new code'],['NewGame/launch.sh','#!/bin/sh',0o100755]]);
   const output=await extractZip(archive,dest);assert.equal(output,path.join(dest,'NewGame'));
   assert.equal(await fs.readFile(path.join(output,'game','script.rpy'),'utf8'),'new code');
-  assert.ok((await fs.stat(path.join(output,'launch.sh'))).mode&0o111);
+  if (process.platform !== 'win32') assert.ok((await fs.stat(path.join(output,'launch.sh'))).mode&0o111);
   assert.ok((await fs.stat(archive)).isFile());
 });
 test('ZIP path traversal cannot write outside its extraction directory',async t=>{

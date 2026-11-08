@@ -78,7 +78,8 @@ export async function inspectInstallation(root, expectedEngine = 'custom') {
     .sort((a,b) => a.relative.split('/').length - b.relative.split('/').length).map(file => file.absolute);
   const apps = files.filter(file => file.directory && /\.app$/i.test(file.relative)).map(file => file.absolute);
   if (/\.app$/i.test(root)) apps.unshift(root);
-  return { engine, identity, company, product, local: [...local.values()], launchers: process.platform === 'darwin' ? [...apps, ...launchers] : launchers, wrappers: wrappers.map(item => item.relative) };
+  // Inventory all launch targets; detectLauncher applies the requested platform.
+  return { engine, identity, company, product, local: [...local.values()], launchers: [...apps, ...launchers], wrappers: wrappers.map(item => item.relative) };
 }
 export function externalCandidates(engine, metadata, { home = os.homedir(), platform = process.platform, env = process.env } = {}) {
   const { identity, company, product } = metadata;

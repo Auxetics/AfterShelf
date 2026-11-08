@@ -35,7 +35,7 @@ app.setName(APP_NAME);
 app.setPath('userData', profile);
 app.setPath('sessionData', profile);
 app.enableSandbox();
-let window, store, browser, quitConfirmed = false, interval;
+let window, store, browser, quitConfirmed = false, interval, quitFlushStarted = false, quitFlushFinished = false;
 let libraryScanController;
 const activeItems = new Map(), operations = new Map();
 const detailOperations = new Set();
@@ -358,7 +358,7 @@ async function captureDownload(item, sourceGameId, thread) {
 async function checkUpdates(full = false) { return checkAllSourceUpdates({ store, clientForSource: site => metadataClient(site), full }); }
 
 const actions = {
-  snapshot: () => ({ ...store.snapshot(), runtime: { version: app.getVersion(), platform: process.platform, arch: process.arch }, browser: browser.state() }),
+  snapshot: () => ({ ...store.snapshot(), runtime: { version: app.getVersion(), platform: process.platform, arch: process.arch, activeInstallations: operations.size }, browser: browser.state() }),
   'choose-root': async () => { const root = await chooseFolder('Choose your games and downloads folder'); if (root) await store.update(state => { state.settings.gamesRoot = root; }); return root; },
   'choose-extractor': async () => {
     const result = await dialog.showOpenDialog(window, { title: 'Select your extraction application', defaultPath: process.platform === 'darwin' ? '/Applications' : undefined, properties: ['openFile', 'openDirectory'] });
@@ -571,4 +571,11 @@ else {
   app.on('second-instance', () => { if (window) { if (window.isMinimized()) window.restore(); window.focus(); } });
   app.whenReady().then(start).catch(error => { dialog.showErrorBox('AfterShelf could not start', error.message); app.quit(); });
   app.on('window-all-closed', () => app.quit());
+  app.on('will-quit', event => {
+    if (!store || quitFlushFinished) return;
+    event.preventDefault();
+    if (quitFlushStarted) return;
+    quitFlushStarted = true;
+    void store.flush().catch(error => console.error('Library flush failed:', error.code || error.message)).finally(() => { quitFlushFinished = true; app.quit(); });
+  });
 }

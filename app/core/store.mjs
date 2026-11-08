@@ -32,6 +32,9 @@ export class Store extends EventEmitter {
     migrateSources(this.data);
   }
   snapshot() { return structuredClone(this.data); }
+  async flush() {
+    for (;;) { const pending = this.pending; await pending; if (pending === this.pending) return; }
+  }
   update(mutator) {
     mutator(this.data);
     const serialized = JSON.stringify(this.data, null, 2);

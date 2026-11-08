@@ -10,7 +10,7 @@ import { Store, redact } from '../app/core/store.mjs';
 async function fixture(t) { const root = await fs.mkdtemp(path.join(os.tmpdir(), 'lc-test-')); t.after(()=>fs.rm(root,{recursive:true,force:true}));return root; }
 test('ZIP entry validation rejects traversal, Windows paths and device names', () => {
   for (const name of ['../outside', 'game/../../outside', '/absolute', 'C:/outside', 'game\\escape', 'game/NUL.txt', 'game/file:stream']) assert.throws(()=>archivePath('/tmp/staging',name), name);
-  assert.equal(archivePath('/tmp/staging','game/saves/slot.save'),'/tmp/staging/game/saves/slot.save');
+  assert.equal(archivePath('/tmp/staging','game/saves/slot.save'),path.join(path.resolve('/tmp/staging'),'game','saves','slot.save'));
   assert.equal(isInside('/games/title','/games/title-other'),false);
 });
 test('RenPy update transfers saves and persistent state without old program files', async t=>{

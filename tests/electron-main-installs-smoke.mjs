@@ -87,12 +87,14 @@ app.whenReady().then(async () => {
     await guest.executeJavaScript("document.querySelector('#download').click()", true);
     for (let n = 0; n < 600 && !(await call('snapshot')).value.downloads.some(job => job.gameId === 'prompt' && job.archiveRemoved); n++) await new Promise(resolve => setTimeout(resolve, 25));
     assert.equal(installPrompts, 1);
+    for (let n = 0; n < 200 && (await call('snapshot')).value.runtime.activeInstallations; n++) await new Promise(resolve => setTimeout(resolve, 25));
+    assert.equal((await call('snapshot')).value.runtime.activeInstallations, 0);
     assert.equal((await call('snapshot')).value.games.find(game => game.id === 'prompt').installationCheck?.status, 'matched');
     assert.equal(launchPickers, pickersBefore); assert.equal(folders, foldersBefore); assert.equal(opens, 1);
     await evaluate("document.querySelector('[data-nav=library]').click()");
     for (let n = 0; n < 100 && !await evaluate("document.querySelectorAll('.game-card [data-action=play]').length===8"); n++) await new Promise(resolve => setTimeout(resolve, 25));
     assert.equal(await evaluate("document.querySelectorAll('.game-card [data-action=play]').length"), 8);
     assert.equal(await evaluate("document.querySelectorAll('.game-card [data-action=install-zip]').length"), 0);
-    clearTimeout(watchdog); app.exit(0);
+    clearTimeout(watchdog); app.quit();
   } catch (error) { console.error(error); clearTimeout(watchdog); app.exit(1); }
 });
