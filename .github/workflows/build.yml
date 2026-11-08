@@ -65,11 +65,14 @@ jobs:
           retention-days: 14
           if-no-files-found: error
           path: |
-            release/**/*.dmg
-            release/**/*.zip
-            release/**/*.exe
-            release/**/*.7z
-            release/**/*.blockmap
+            release/*.dmg
+            release/*.zip
+            release/*.exe
+            release/*.7z
+            release/*.blockmap
+            release/nsis-web/*.exe
+            release/nsis-web/*.7z
+            release/nsis-web/*.blockmap
 
   prerelease:
     name: Publish tagged alpha
