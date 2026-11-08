@@ -33,7 +33,7 @@ jobs:
             platform: mac
             arch: arm64
           - name: macOS Intel
-            runner: macos-15-intel
+            runner: macos-15
             platform: mac
             arch: x64
           - name: Windows x64

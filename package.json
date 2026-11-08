@@ -26,7 +26,6 @@
   "build": {
     "appId": "com.aftershelf.desktop",
     "productName": "AfterShelf",
-    "compression": "maximum",
     "directories": {
       "output": "release"
     },
