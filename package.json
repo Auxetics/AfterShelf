@@ -54,8 +54,7 @@
     "win": {
       "icon": "app/assets/aftershelf.ico",
       "target": [
-        "nsis-web",
-        "zip"
+        "nsis-web"
       ]
     },
     "nsisWeb": {

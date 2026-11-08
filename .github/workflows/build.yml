@@ -75,16 +75,12 @@ jobs:
           retention-days: 14
           if-no-files-found: error
           path: |
-            release/*.pkg
             release/*.dmg
             release/*.zip
-            release/*.sha256
-            release/*.exe
-            release/*.7z
-            release/*.blockmap
             release/nsis-web/*.exe
             release/nsis-web/*.7z
-            release/nsis-web/*.blockmap
+            !release/*.blockmap
+            !release/nsis-web/*.blockmap
             !release/nsis-web/*__uninstaller.exe
 
   prerelease:
@@ -114,3 +110,9 @@ jobs:
           while IFS= read -r -d '' asset; do
             gh release upload "$RELEASE_TAG" "$asset" --clobber --repo "$GITHUB_REPOSITORY"
           done < <(find release -type f -print0)
+          mapfile -t existing < <(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
+          for asset_name in "${existing[@]}"; do
+            if [[ -z "$(find release -type f -name "$asset_name" -print -quit)" ]]; then
+              gh release delete-asset "$RELEASE_TAG" "$asset_name" --yes --repo "$GITHUB_REPOSITORY"
+            fi
+          done

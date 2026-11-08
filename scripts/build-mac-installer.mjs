@@ -229,30 +229,10 @@ export async function buildMacBootstrap({
     let expectedSha256 = '';
     if (existsSync(payloadZip)) {
       expectedSha256 = await sha256File(payloadZip);
-      await fs.writeFile(`${payloadZip}.sha256`, `${expectedSha256}  ${path.basename(payloadZip)}\n`, 'utf8');
     }
 
     const staging = await fs.mkdtemp(path.join(os.tmpdir(), `aftershelf-mac-setup-${arch}-`));
     try {
-      // 1. Build native macOS .pkg bootstrap installer (~2 KB)
-      const pkgScriptsDir = path.join(staging, 'pkg-scripts');
-      await fs.mkdir(pkgScriptsDir, { recursive: true });
-      await fs.writeFile(
-        path.join(pkgScriptsDir, 'postinstall'),
-        installerScript({ version, arch, owner: publish.owner, repo: publish.repo, expectedSha256, pkgMode: true }),
-        { mode: 0o755 }
-      );
-      const pkgPath = path.join(releaseDir, `AfterShelf-Web-Setup-${version}-mac-${arch}.pkg`);
-      execFileSync('pkgbuild', [
-        '--nopayload',
-        '--scripts', pkgScriptsDir,
-        '--identifier', `com.aftershelf.desktop.installer.${arch}`,
-        '--version', pkgVersion,
-        pkgPath
-      ], { stdio: 'ignore' });
-      built.push(pkgPath);
-
-      // 2. Also build DMG wrapper with Install AfterShelf.app when hdiutil is available
       const dmgStage = path.join(staging, 'dmg');
       const appDir = path.join(dmgStage, 'Install AfterShelf.app');
       const contentsDir = path.join(appDir, 'Contents');
@@ -280,7 +260,23 @@ export async function buildMacBootstrap({
         ], { stdio: 'ignore' });
         built.push(dmgPath);
       } catch {
-        // hdiutil may be restricted in headless sandboxes; .pkg is always generated.
+        // Fallback for restricted local sandboxes where hdiutil cannot attach disk images.
+        const pkgScriptsDir = path.join(staging, 'pkg-scripts');
+        await fs.mkdir(pkgScriptsDir, { recursive: true });
+        await fs.writeFile(
+          path.join(pkgScriptsDir, 'postinstall'),
+          installerScript({ version, arch, owner: publish.owner, repo: publish.repo, expectedSha256, pkgMode: true }),
+          { mode: 0o755 }
+        );
+        const pkgPath = path.join(releaseDir, `AfterShelf-Web-Setup-${version}-mac-${arch}.pkg`);
+        execFileSync('pkgbuild', [
+          '--nopayload',
+          '--scripts', pkgScriptsDir,
+          '--identifier', `com.aftershelf.desktop.installer.${arch}`,
+          '--version', pkgVersion,
+          pkgPath
+        ], { stdio: 'ignore' });
+        built.push(pkgPath);
       }
     } finally {
       await fs.rm(staging, { recursive: true, force: true });

@@ -61,7 +61,9 @@ export function selectReleaseUpdate(releases, {
   const platformToken = platform === 'darwin' ? 'mac' : platform === 'win32' ? 'win' : '';
   if (!platformToken || !parseAppVersion(currentVersion)) return null;
 
-  const assetPattern = new RegExp(`^AfterShelf-.*-${platformToken}-${arch}\\.zip$`, 'i');
+  const zipPattern = new RegExp(`^AfterShelf-.*-${platformToken}-${arch}\\.zip$`, 'i');
+  const winPayloadPattern = new RegExp(`^aftershelf-.*-${arch}\\.nsis\\.7z$`, 'i');
+  const winInstallerPattern = new RegExp(`^AfterShelf-Web-Setup-.*-win-${arch}\\.exe$`, 'i');
   const candidates = [];
 
   for (const release of list) {
@@ -70,7 +72,20 @@ export function selectReleaseUpdate(releases, {
     const cmp = compareAppVersions(rawVersion, currentVersion);
     if (cmp === null || cmp <= 0) continue;
     const assets = Array.isArray(release.assets) ? release.assets : [];
-    const asset = assets.find(item => item?.name && assetPattern.test(item.name) && item.browser_download_url);
+    let asset = assets.find(item => item?.name && zipPattern.test(item.name) && item.browser_download_url);
+    let installerAsset = null;
+    if (!asset && platform === 'win32') {
+      const nsisPayload = assets.find(item => item?.name && winPayloadPattern.test(item.name) && item.browser_download_url);
+      const nsisInstaller = assets.find(item => item?.name && winInstallerPattern.test(item.name) && item.browser_download_url);
+      if (nsisPayload && nsisInstaller) {
+        asset = nsisPayload;
+        installerAsset = {
+          name: nsisInstaller.name,
+          url: nsisInstaller.browser_download_url,
+          size: Number(nsisInstaller.size) || 0
+        };
+      }
+    }
     if (!asset) continue;
     const checksumAsset = assets.find(item => item?.name === `${asset.name}.sha256` && item.browser_download_url) || null;
     candidates.push({
@@ -81,6 +96,7 @@ export function selectReleaseUpdate(releases, {
         url: asset.browser_download_url,
         size: Number(asset.size) || 0
       },
+      installerAsset,
       checksumAsset: checksumAsset
         ? { name: checksumAsset.name, url: checksumAsset.browser_download_url }
         : null,
@@ -255,10 +271,26 @@ ${relaunch ? '/usr/bin/open "$TARGET_APP"' : ''}
 `;
 }
 
-export function buildWindowsRestartScript({ pid, stagedDirPath, targetDirPath, exeName = 'AfterShelf.exe', updatesDir, relaunch = true }) {
+export function buildWindowsRestartScript({ pid, stagedDirPath, installerExePath = '', packageFilePath = '', targetDirPath, exeName = 'AfterShelf.exe', updatesDir, relaunch = true }) {
+  const escapedUpdates = updatesDir.replace(/'/g, "''");
+  if (installerExePath && packageFilePath) {
+    const escapedInstaller = installerExePath.replace(/'/g, "''");
+    const escapedPkg = packageFilePath.replace(/'/g, "''");
+    const args = relaunch
+      ? `'/S', '--force-run', '--package-file="${escapedPkg}"'`
+      : `'/S', '--package-file="${escapedPkg}"'`;
+    return `$ErrorActionPreference = 'SilentlyContinue'
+$procId = ${Number(pid)}
+for ($i = 0; $i -lt 150; $i++) {
+  if (-not (Get-Process -Id $procId -ErrorAction SilentlyContinue)) { break }
+  Start-Sleep -Milliseconds 200
+}
+Start-Process -FilePath '${escapedInstaller}' -ArgumentList @(${args}) -Wait
+Remove-Item -Path '${escapedUpdates}' -Recurse -Force
+`;
+  }
   const escapedStage = stagedDirPath.replace(/'/g, "''");
   const escapedTarget = targetDirPath.replace(/'/g, "''");
-  const escapedUpdates = updatesDir.replace(/'/g, "''");
   const escapedExe = path.join(targetDirPath, exeName).replace(/'/g, "''");
   return `$ErrorActionPreference = 'SilentlyContinue'
 $procId = ${Number(pid)}
@@ -361,6 +393,7 @@ export class AppUpdater {
 
       const stageDir = path.join(this.updatesDir, 'staged');
       await fs.mkdir(stageDir, { recursive: true });
+      this.stagedInstallerPath = '';
       if (this.platform === 'darwin') {
         execFileSync('/usr/bin/ditto', ['-x', '-k', archivePath, stageDir]);
         const appBundle = path.join(stageDir, 'AfterShelf.app');
@@ -368,22 +401,35 @@ export class AppUpdater {
           throw new Error('Downloaded macOS update did not contain a valid AfterShelf.app bundle.');
         }
         this.stagedPath = appBundle;
+        await fs.rm(archivePath, { force: true });
       } else if (this.platform === 'win32') {
-        const extractedRoot = await extractZip(archivePath, stageDir);
-        const exeCandidate = existsSync(path.join(extractedRoot, 'AfterShelf.exe'))
-          ? extractedRoot
-          : existsSync(path.join(stageDir, 'AfterShelf.exe'))
-            ? stageDir
-            : '';
-        if (!exeCandidate) {
-          throw new Error('Downloaded Windows update did not contain AfterShelf.exe.');
+        if (update.installerAsset) {
+          const installerPath = path.join(stageDir, update.installerAsset.name);
+          const payloadPath = path.join(stageDir, update.asset.name);
+          await fs.rename(archivePath, payloadPath);
+          await downloadFile(update.installerAsset.url, installerPath, {
+            getStream: this.getStream,
+            expectedTotal: update.installerAsset.size
+          });
+          this.stagedInstallerPath = installerPath;
+          this.stagedPath = payloadPath;
+        } else {
+          const extractedRoot = await extractZip(archivePath, stageDir);
+          const exeCandidate = existsSync(path.join(extractedRoot, 'AfterShelf.exe'))
+            ? extractedRoot
+            : existsSync(path.join(stageDir, 'AfterShelf.exe'))
+              ? stageDir
+              : '';
+          if (!exeCandidate) {
+            throw new Error('Downloaded Windows update did not contain AfterShelf.exe.');
+          }
+          this.stagedPath = exeCandidate;
+          await fs.rm(archivePath, { force: true });
         }
-        this.stagedPath = exeCandidate;
       } else {
         throw new Error(`Self-updating is not supported on platform ${this.platform}.`);
       }
 
-      await fs.rm(archivePath, { force: true });
       this.setState({
         status: 'ready',
         version: update.version,
@@ -441,6 +487,8 @@ export class AppUpdater {
       const script = buildWindowsRestartScript({
         pid,
         stagedDirPath: this.stagedPath,
+        installerExePath: this.stagedInstallerPath || '',
+        packageFilePath: this.stagedInstallerPath ? this.stagedPath : '',
         targetDirPath: targetPath,
         updatesDir: this.updatesDir,
         relaunch
