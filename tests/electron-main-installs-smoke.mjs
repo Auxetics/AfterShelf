@@ -6,7 +6,7 @@ import fs from 'node:fs/promises';
 import { realpathSync } from 'node:fs';
 import path from 'node:path';
 
-const root = realpathSync(path.join(process.env.AFTERSHELF_DATA, 'games'));
+const root = realpathSync.native(path.join(process.env.AFTERSHELF_DATA, 'games'));
 let opens = 0, cancelLaunch = true, folders = 0, launchPickers = 0, installPrompts = 0;
 shell.openPath = async file => { assert.equal(file, path.join(root, 'external.rar')); opens++; return ''; };
 dialog.showMessageBox = async (_window, options) => {
