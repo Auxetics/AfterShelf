@@ -35,7 +35,7 @@ app.setName(APP_NAME);
 app.setPath('userData', profile);
 app.setPath('sessionData', profile);
 app.enableSandbox();
-let window, store, browser, quitConfirmed = false, interval, quitFlushStarted = false, quitFlushFinished = false;
+let window, store, browser, quitConfirmed = false, interval, closingForFlush = false;
 let libraryScanController;
 const activeItems = new Map(), operations = new Map();
 const detailOperations = new Set();
@@ -551,8 +551,16 @@ async function start() {
         for (const controller of operations.values()) controller.abort();
         // The old installation is preserved; incomplete destinations are never committed.
         await store.update(state => { for (const job of state.downloads) if (job.status === 'installing') { job.status = 'downloaded'; job.phase = 'Installation not confirmed'; } });
+        await store.flush();
         window.close();
       });
+    } else if (!quitConfirmed) {
+      // Flush while a window still keeps Electron's I/O loop alive. Waiting in
+      // will-quit can stall on some hosts after the last window is destroyed.
+      event.preventDefault();
+      if (closingForFlush) return;
+      closingForFlush = true;
+      void store.flush().catch(error => console.error('Library flush failed:', error.code || error.message)).finally(() => { quitConfirmed = true; window?.close(); });
     }
   });
   window.once('ready-to-show', () => window.show());
@@ -571,11 +579,4 @@ else {
   app.on('second-instance', () => { if (window) { if (window.isMinimized()) window.restore(); window.focus(); } });
   app.whenReady().then(start).catch(error => { dialog.showErrorBox('AfterShelf could not start', error.message); app.quit(); });
   app.on('window-all-closed', () => app.quit());
-  app.on('will-quit', event => {
-    if (!store || quitFlushFinished) return;
-    event.preventDefault();
-    if (quitFlushStarted) return;
-    quitFlushStarted = true;
-    void store.flush().catch(error => console.error('Library flush failed:', error.code || error.message)).finally(() => { quitFlushFinished = true; app.quit(); });
-  });
 }
