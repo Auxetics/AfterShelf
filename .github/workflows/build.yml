@@ -45,10 +45,6 @@ jobs:
         run: npm ci
       - name: Check source syntax
         run: npm run check
-      - name: Run regression tests
-        run: npm test
-      - name: Run isolated Electron tests
-        run: npm run test:electron
       - name: Validate release tag
         if: startsWith(github.ref, 'refs/tags/')
         shell: bash
@@ -88,4 +84,4 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           RELEASE_TAG: ${{ github.ref_name }}
-        run: gh release create "$RELEASE_TAG" release/* --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --title "AfterShelf $RELEASE_TAG" --notes-file docs/release-notes.md
+        run: gh release create "$RELEASE_TAG" release/* --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --title "AfterShelf $RELEASE_TAG" --notes "Experimental alpha for Windows x64, macOS Apple Silicon and macOS Intel. General engine save-transfer profiles are experimental; report compatibility issues with redacted text diagnostics. Windows Web Setup downloads its separate application payload from this release. Mac DMGs contain the app and an Applications shortcut. Packages are not notarized or publisher-signed; application self-updating is not implemented."

@@ -43,11 +43,9 @@ On macOS, `Start AfterShelf.command` also starts a development checkout after de
 
 ```sh
 npm run check
-npm test
-npm run test:electron
 ```
 
-Regression/native tests use generated files, loopback servers and isolated browser profiles. They do not use a developer's forum login or game library. Generated test output, dependencies and build artifacts are ignored by Git. See [testing status](docs/testing-status.md) for coverage and live-validation limits.
+The public checkout contains the application, required assets, dependency lockfile and build configuration. Private tests, internal specifications and local runtime data are excluded from Git.
 
 Build packages locally:
 
@@ -71,5 +69,3 @@ The repository excludes library databases, cookies/session stores, local credent
 - External extraction completion may require output selection. The external app may continue after AfterShelf closes.
 - Removing a library entry leaves its game files on disk. Delete/move files in Finder/Explorer and the next startup/scan reconciles their availability.
 - Live provider compatibility and complete real-game update/save cycles still need testing. The alpha does not provide game downloads, a torrent client, patch installation or save-format conversion.
-
-[Application specification](docs/application-spec.md) · [Alpha scope](docs/alpha-readiness.md) · [Engine profiles and research](docs/engine-save-research.md)

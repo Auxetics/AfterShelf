@@ -12,5 +12,5 @@ async function check(directory) {
     }
   }
 }
-await check('app'); await check('scripts'); await check('tests');
+await check('app'); await check('scripts');
 console.log('JavaScript syntax checks passed.');
