@@ -21,6 +21,7 @@ import { checkInstalledVersion } from './core/install-version.mjs';
 import { inspectLibraryPresence, applyLibraryPresence } from './core/reconciliation.mjs';
 import { removePartialDownload } from './core/download-cleanup.mjs';
 import { manualInstallReason } from './core/install-policy.mjs';
+import { planGameDeletion, deleteGameFiles, removalRoots, forgetGame } from './core/removal.mjs';
 import { ForumMetadata } from './core/forum-metadata.mjs';
 import { sessionResponse } from './core/session-response.mjs';
 import { checkAllSourceUpdates } from './core/update-checker.mjs';
@@ -122,7 +123,7 @@ async function scanLibrary({ startup = false } = {}) {
       return result;
     }
     let last = 0;
-    const result = await discoverGames(root, { signal: libraryScanController.signal, installedGames: store.data.games, existing: store.data.games.flatMap(game => [game.installation?.root, ...game.previous.map(item => item.root)]).filter(Boolean), downloads: store.data.downloads, progress: ({ count, found }) => {
+    const result = await discoverGames(root, { signal: libraryScanController.signal, installedGames: store.data.games, existing: [...store.data.games.flatMap(game => [game.installation?.root, ...game.previous.map(item => item.root)]).filter(Boolean), ...(startup ? store.data.ignoredGameRoots || [] : [])], downloads: store.data.downloads, progress: ({ count, found }) => {
       if (Date.now() - last > 300) { last = Date.now(); void store.update(state => { state.libraryScan.message = `Checked ${count} folders · ${found} items found`; }); }
     }});
     await store.update(state => {
@@ -168,7 +169,7 @@ function applyImports(state, imports) {
   let added = 0;
   for (const entry of imports) {
     if (entry.kind === 'archive') { if (importArchive(state, entry).added) added++; }
-    else if (!state.games.some(game => game.id === entry.id)) { state.games.unshift(entry); added++; }
+    else if (!state.games.some(game => game.id === entry.id)) { state.games.unshift(entry); state.ignoredGameRoots = (state.ignoredGameRoots || []).filter(root => !isInside(root, entry.installation.root, true)); added++; }
   }
   return added;
 }
@@ -502,8 +503,27 @@ const actions = {
   },
   'remove-game': async id => {
     const game = getGame(id); if (operations.has(id) || [...activeItems.keys()].some(jobId => getJob(jobId).gameId === id)) throw new Error('Finish this game’s active work first.');
-    const result = await dialog.showMessageBox(window, { type: 'question', message: `Remove ${game.title} from your library?`, detail: 'Installed game files and saves will stay on disk.', buttons: ['Cancel', 'Remove from library'], defaultId: 0, cancelId: 0 });
-    if (result.response) await store.update(state => { state.games = state.games.filter(item => item.id !== id); for (const job of state.downloads) if (job.gameId === id) job.gameId = null; });
+    const controller = new AbortController(); operations.set(id, controller);
+    try {
+      const first = await dialog.showMessageBox(window, { type: 'question', message: `Remove ${game.title} from your library?`, detail: 'Next, choose whether to keep or delete its installed files.', buttons: ['Cancel', 'Remove from Library'], defaultId: 0, cancelId: 0 });
+      if (!first.response) return { removed: false };
+      const choice = await dialog.showMessageBox(window, { type: 'warning', message: 'Keep or delete the game files?', detail: 'Keep files leaves the current and retained versions on disk. Delete game files permanently removes those installation folders and their contents, including local saves and preferences. Downloads and save data outside those folders are kept.', buttons: ['Cancel', 'Keep files', 'Delete game files'], defaultId: 1, cancelId: 0 });
+      if (!choice.response) return { removed: false };
+      controller.signal.throwIfAborted();
+      const deleting = choice.response === 2, roots = removalRoots(game).filter(root => !store.data.settings.gamesRoot || !isInside(root, store.data.settings.gamesRoot, true));
+      if (deleting) {
+        const plan = await planGameDeletion(game, store.data.games, {
+          collectionRoot: store.data.settings.gamesRoot,
+          protectedRoots: [store.data.settings.gamesRoot, ...(store.data.ignoredGameRoots || []).filter(root => !roots.includes(root)), ...['home', 'desktop', 'documents', 'downloads', 'appData'].map(name => app.getPath(name))],
+          protectedTrees: [app.getPath('userData'), app.getAppPath(), app.getPath('exe')], signal: controller.signal
+        });
+        await deleteGameFiles(plan, { signal: controller.signal });
+      }
+      controller.signal.throwIfAborted();
+      await store.update(state => forgetGame(state, id, { deleteFiles: deleting, ignoredRoots: roots }));
+      await store.log('Game removed', deleting ? 'Registered current/retained installation folders deleted.' : 'Files kept; startup scans will not re-add this game.');
+      return { removed: true, message: deleting ? 'Game removed and installed files deleted.' : 'Game removed from library. Files kept.' };
+    } finally { operations.delete(id); notify(); }
   },
   'diagnostics-copy': () => clipboard.writeText(store.diagnostic(app.getVersion(), process.platform, process.arch)),
   'diagnostics-save': async () => {
@@ -544,7 +564,7 @@ async function start() {
   window.on('close', event => {
     if (!quitConfirmed && activeWork()) {
       event.preventDefault();
-      void dialog.showMessageBox(window, { type: 'warning', message: 'Closing the app will cancel the active download/update. Are you sure?', buttons: ['Stay open', 'Close and cancel'], defaultId: 0, cancelId: 0 }).then(async ({ response }) => {
+      void dialog.showMessageBox(window, { type: 'warning', message: 'Closing will interrupt active downloads, installation or file deletion. Are you sure?', buttons: ['Stay open', 'Close and cancel'], defaultId: 0, cancelId: 0 }).then(async ({ response }) => {
         if (!response) return;
         quitConfirmed = true;
         for (const item of activeItems.values()) item.cancel();

@@ -99,7 +99,7 @@ function renderDownloads() {
     `<div class="section-label"><span>${state.downloads.length} DOWNLOADS</span><span>${ready} ready to install</span></div>`+
     (state.downloads.length ? `<div class="download-list">${state.downloads.map(job=>{
       const game = currentGame(job.gameId), active = ['downloading','queued','retrying'].includes(job.status), id = `data-id="${e(job.id)}"`, installed = job.status === 'installed';
-      const labels = { downloading:'Downloading', downloaded:'Ready to install', 'awaiting-folder':'Waiting for extracted folder', failed:'Download failed', cancelled:'Cancelled', installing:'Installing', installed:'Installed', queued:'Queued' };
+      const labels = { downloading:'Downloading', downloaded:'Ready to install', 'awaiting-folder':'Waiting for extracted folder', failed:'Download failed', cancelled:'Cancelled', installing:'Installing', installed:'Installed', removed:'Game removed', queued:'Queued' };
       let actions = '';
       if (active) actions += button('cancel-download','Cancel',null,id);
       if (['failed','cancelled'].includes(job.status)) actions += button('retry-download','Return to thread','globe',id);
@@ -108,7 +108,7 @@ function renderDownloads() {
         actions += button('install-zip',finish ? game.installation?'Finish update':'Finish installation' : game.installation?'Update game':'Install game','download',id,true)+button('extract-external','Open extraction app','arrow',id+' title="Open the archive again in your extraction app"')+button('select-extracted','Select extracted folder','folder',id);
       }
       if (!job.archiveRemoved && !job.partialRemoved) actions += button('reveal-download',runtime.platform==='darwin'?'Show in Finder':'Show in Explorer','folder',id);
-      if (!game && !active) actions = button('assign-download','Add to library','plus',id,true)+actions;
+      if (!game && canInstallArchive(job)) actions = button('assign-download','Add to library','plus',id,true)+actions;
       if (game && job.thread?.threadUrl && canInstallArchive(job)) actions += button('assign-download','Change game','library',id+' title="Use this download to update a different existing library game"');
       if (game?.threadUrl) actions += button('download-thread','Open thread','globe',id);
       if (installed && !job.archiveRemoved) actions += button('cleanup-download','Retry archive cleanup','refresh',id);
@@ -314,6 +314,7 @@ document.addEventListener('click',event=>{
       const job=state.downloads.find(item=>item.id===id), linked=state.games.some(game=>game.id===job.gameId);
       await modal(`<h2>${linked?'Choose library game':'Add this download'}</h2><p>Add a fresh game to your library, or associate this download with a game you already track. Updating only applies when that game has an installation.</p><label class="field"><span>Use this download for</span><select name="gameId" id="download-game-choice"><option value="__new__" ${linked?'':'selected'}>Add as new game</option>${state.games.length?`<optgroup label="Existing library games">${state.games.map(game=>`<option value="${e(game.id)}" ${game.id===job.gameId?'selected':''}>${e(game.title)} · ${e(sourceLabel(state.settings,game))}${game.installation?' — update':' — first install'}</option>`).join('')}</optgroup>`:''}</select></label><div id="download-new-game" ${linked?'hidden':''}><label class="field"><span>Game title</span><input name="title" id="download-new-title" ${linked?'':'required'} value="${e(archiveTitle(job.filename))}"></label><label class="field"><span>Engine</span><select name="engine">${engineOptions('custom')}</select><small>If unknown, leave Other / custom; extraction can identify supported layouts.</small></label><label class="field"><span>Forum thread (optional)</span><input name="threadUrl" type="url" placeholder="https://f95zone.to/threads/game.12345/"><small>A matching thread reuses its existing library entry.</small></label></div><label class="field"><span>Archive version (optional)</span><input name="version" value="${e(job.version||'')}"></label><div class="form-actions"><button type="submit" class="button primary">Continue</button></div>`,async data=>{const create=data.gameId==='__new__'?{title:data.title,engine:data.engine,threadUrl:data.threadUrl}:undefined;await api('assign-download',{id,gameId:create?undefined:data.gameId,version:data.version,create});closeModal();toast('Download linked. It is ready to install from Downloads.');});return;
     }
+    if(action==='remove-game'){const result=await api(action,id);if(result?.removed){closeModal();toast(result.message);}return;}
     if(action==='retry-download'){closeModal();await api(action,id);await navigate('browse');return;}
     if(['install-zip','extract-external','select-extracted'].includes(action)){closeModal();await api('install-download',{id,mode:action==='install-zip'?'auto':action==='extract-external'?'external':'folder'});return;}
     if(action==='download-thread'){const job=state.downloads.find(job=>job.id===id),game=currentGame(job.gameId);await navigate('browse');await api('browser-open',{url:game.threadUrl,gameId:game.id});return;}

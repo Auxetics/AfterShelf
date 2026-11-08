@@ -73,6 +73,7 @@ jobs:
             release/nsis-web/*.exe
             release/nsis-web/*.7z
             release/nsis-web/*.blockmap
+            !release/nsis-web/*__uninstaller.exe
 
   prerelease:
     name: Publish tagged alpha

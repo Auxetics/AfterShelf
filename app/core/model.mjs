@@ -25,7 +25,7 @@ export function initialState() {
   return {
     schema: 1,
     settings: { site: structuredClone(DEFAULT_SITE), sources: { f95: structuredClone(DEFAULT_SITE), lc: structuredClone(DEFAULT_LC_SITE) }, gamesRoot: '', extractor: '', retention: 'keep', theme: 'dark', intervalMinutes: 15, setupCompleted: false, downloadMode: 'download-only' },
-    games: [], downloads: [], history: [], checkpoints: {},
+    games: [], downloads: [], history: [], checkpoints: {}, ignoredGameRoots: [],
     scan: { active: false, message: 'Not checked yet', lastChecked: null, error: '' },
     sourceStatus: {}, sourceScans: {},
     detailScan: { active: false, message: '' },

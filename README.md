@@ -67,5 +67,5 @@ The repository excludes library databases, cookies/session stores, local credent
 - Save profiles are general engine rules; a game's customised layout or changed save format may need manual handling. Ren'Py and RPG Maker rules have the most fixture coverage.
 - HTML games currently launch in the default browser; browser-storage compatibility across changing file locations is not managed by AfterShelf.
 - External extraction completion may require output selection. The external app may continue after AfterShelf closes.
-- Removing a library entry leaves its game files on disk. Delete/move files in Finder/Explorer and the next startup/scan reconciles their availability.
+- Remove from Library first confirms removal, then offers Keep files or permanent deletion of the current/retained installation folders, including local saves. Downloads and save data outside the deleted installation folders remain. Kept folders are excluded from automatic startup discovery; a manual scan can re-import them.
 - Live provider compatibility and complete real-game update/save cycles still need testing. The alpha does not provide game downloads, a torrent client, patch installation or save-format conversion.
