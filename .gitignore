@@ -1,0 +1,76 @@
+node_modules/
+release/
+.test-output/
+*.log
+.DS_Store
+
+# Local runtime data and browser/login sessions
+/.local/
+/local-data/
+/user-data/
+/profiles/
+/.aftershelf/
+/.library/
+/Games/
+/downloads/
+**/library.json
+**/library.json.*
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.db
+*.db-*
+**/Cookies
+**/Cookies-journal
+**/Login Data*
+**/Local State
+**/Preferences
+**/Secure Preferences
+**/Local Storage/
+**/Session Storage/
+**/IndexedDB/
+**/Cache/
+**/Code Cache/
+**/GPUCache/
+**/Crashpad/
+**/Singleton*
+**/Network/
+
+# Credentials, signing material and local configuration
+.env
+.env.*
+!.env.example
+.npmrc
+.yarnrc
+credentials*.json
+*.pem
+*.key
+*.p12
+*.pfx
+*diagnostics*.txt
+.codex/
+.agents/
+.idea/
+.vscode/
+
+# Generated output and downloaded games
+dist/
+coverage/
+.cache/
+*.zip
+*.7z
+*.rar
+*.dmg
+*.exe
+*.app/
+*.crdownload
+*.part
+*.tmp
+
+# Local browser exports and test traces
+cookies*.json
+session*.json
+*.har
+*.trace
+playwright-report/
+test-results/

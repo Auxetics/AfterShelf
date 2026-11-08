@@ -1,0 +1,37 @@
+name: Alpha bug report
+description: Report a problem with AfterShelf.
+body:
+  - type: input
+    id: version
+    attributes:
+      label: AfterShelf version
+      placeholder: 0.1.0-alpha.1
+    validations:
+      required: true
+  - type: dropdown
+    id: platform
+    attributes:
+      label: Platform
+      options:
+        - Windows x64
+        - macOS Apple Silicon (ARM64)
+        - macOS Intel (x64)
+    validations:
+      required: true
+  - type: input
+    id: engine
+    attributes:
+      label: Game engine, if relevant
+      placeholder: Ren’Py, RPG Maker MV, Unity…
+  - type: textarea
+    id: steps
+    attributes:
+      label: Steps and what happened
+      description: Include the expected result and any exact error message.
+    validations:
+      required: true
+  - type: textarea
+    id: diagnostics
+    attributes:
+      label: Diagnostics
+      description: Paste or attach the .txt from Activity → Copy diagnostics / Save .txt. Do not upload accounts, cookies, passwords, game files or your library database.

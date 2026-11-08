@@ -1,0 +1,75 @@
+{
+  "name": "aftershelf",
+  "productName": "AfterShelf",
+  "version": "0.1.0-alpha.1",
+  "description": "A local desktop game library with forum browsing and save-aware updates.",
+  "private": true,
+  "type": "module",
+  "main": "app/main.mjs",
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron .",
+    "test": "node --test tests/*.test.mjs",
+    "test:electron": "electron tests/electron-popup-smoke.mjs",
+    "check": "node scripts/check.mjs",
+    "icons": "node scripts/build-icons.mjs",
+    "pack": "electron-builder --dir",
+    "dist:mac": "electron-builder --mac --x64 --arm64",
+    "dist:win": "electron-builder --win --x64"
+  },
+  "dependencies": {
+    "cheerio": "^1.1.2",
+    "yauzl": "^3.2.0"
+  },
+  "devDependencies": {
+    "electron": "45.2.3",
+    "electron-builder": "^26.0.12"
+  },
+  "build": {
+    "appId": "com.aftershelf.desktop",
+    "productName": "AfterShelf",
+    "directories": {
+      "output": "release"
+    },
+    "files": [
+      "app/**/*",
+      "package.json"
+    ],
+    "asar": true,
+    "mac": {
+      "category": "public.app-category.games",
+      "icon": "app/assets/aftershelf.icns",
+      "target": [
+        "dmg",
+        "zip"
+      ],
+      "identity": "-",
+      "hardenedRuntime": false
+    },
+    "win": {
+      "icon": "app/assets/aftershelf.ico",
+      "target": [
+        "nsis-web",
+        "zip"
+      ]
+    },
+    "nsisWeb": {
+      "oneClick": false,
+      "allowToChangeInstallationDirectory": true
+    },
+    "artifactName": "AfterShelf-${version}-${os}-${arch}.${ext}",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "Auxetics",
+        "repo": "AfterShelf",
+        "releaseType": "prerelease"
+      }
+    ]
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/Auxetics/AfterShelf.git"
+  },
+  "author": "Auxetics"
+}

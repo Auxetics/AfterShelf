@@ -1,0 +1,91 @@
+name: Build AfterShelf
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: build-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: macOS ARM64
+            runner: macos-15
+            platform: mac
+            arch: arm64
+          - name: macOS Intel
+            runner: macos-15-intel
+            platform: mac
+            arch: x64
+          - name: Windows x64
+            runner: windows-2025
+            platform: win
+            arch: x64
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version: '24'
+          cache: npm
+      - name: Install locked dependencies
+        run: npm ci
+      - name: Check source syntax
+        run: npm run check
+      - name: Run regression tests
+        run: npm test
+      - name: Run isolated Electron tests
+        run: npm run test:electron
+      - name: Validate release tag
+        if: startsWith(github.ref, 'refs/tags/')
+        shell: bash
+        run: node -e 'const p=require("./package.json"); if(process.env.GITHUB_REF_NAME!=="v"+p.version) throw new Error("Tag must match package.json version")'
+      - name: Build application packages
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+        run: npx --no-install electron-builder --${{ matrix.platform }} --${{ matrix.arch }} --publish never
+      - name: Upload architecture packages
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: AfterShelf-${{ matrix.platform }}-${{ matrix.arch }}
+          retention-days: 14
+          if-no-files-found: error
+          path: |
+            release/*.dmg
+            release/*.zip
+            release/*.exe
+            release/*.7z
+            release/*.blockmap
+
+  prerelease:
+    name: Publish tagged alpha
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          pattern: AfterShelf-*
+          merge-multiple: true
+          path: release
+      - name: Publish prerelease packages
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: gh release create "$RELEASE_TAG" release/* --repo "$GITHUB_REPOSITORY" --verify-tag --prerelease --title "AfterShelf $RELEASE_TAG" --notes-file docs/release-notes.md
