@@ -58,6 +58,7 @@ export function installerScript({ version, arch, owner, repo, expectedSha256 = '
   const baseUrl = `https://github.com/${owner}/${repo}/releases/download/${version}`;
   return `#!/bin/zsh
 set -euo pipefail
+unsetopt bg_nice
 
 VERSION=${JSON.stringify(version)}
 BUILT_ARCH=${JSON.stringify(arch)}
@@ -65,9 +66,20 @@ EXPECTED_SHA256=${JSON.stringify(expectedSha256)}
 RELEASE_BASE="\${AFTERSHELF_RELEASE_BASE_URL:-${baseUrl}}"
 NONINTERACTIVE="\${AFTERSHELF_NONINTERACTIVE:-${pkgMode ? '1' : '0'}}"
 PKG_TARGET_VOLUME="\${3:-}"
+PROGRESS_PID=""
+DOWNLOAD_PID=""
+
+stop_progress() {
+  if [[ -n "\$PROGRESS_PID" ]]; then
+    kill "\$PROGRESS_PID" 2>/dev/null || true
+    wait "\$PROGRESS_PID" 2>/dev/null || true
+    PROGRESS_PID=""
+  fi
+}
 
 alert_error() {
   local msg="\$1"
+  stop_progress
   if [[ "\$NONINTERACTIVE" == "1" ]]; then
     print -u2 "AfterShelf Web Setup error: \$msg"
   else
@@ -134,17 +146,61 @@ PAYLOAD_URL="\${RELEASE_BASE}/\${PAYLOAD_NAME}"
 CHECKSUM_URL="\${PAYLOAD_URL}.sha256"
 
 WORK_DIR="\$(/usr/bin/mktemp -d "\${TMPDIR:-/tmp}/aftershelf-web-setup.XXXXXX")"
-trap '/bin/rm -rf "\$WORK_DIR"' EXIT INT TERM
+cleanup() {
+  if [[ -n "\$DOWNLOAD_PID" ]]; then
+    kill "\$DOWNLOAD_PID" 2>/dev/null || true
+    wait "\$DOWNLOAD_PID" 2>/dev/null || true
+  fi
+  stop_progress
+  /bin/rm -rf "\$WORK_DIR"
+}
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 ARCHIVE_PATH="\$WORK_DIR/\$PAYLOAD_NAME"
 EXTRACT_DIR="\$WORK_DIR/extracted"
+PROGRESS_FILE="\$WORK_DIR/progress"
+
+write_progress() {
+  if [[ "\$NONINTERACTIVE" != "1" ]]; then
+    printf '%s\\t%s\\t%s\\n' "\$1" "\${2:-0}" "\${3:-0}" > "\$PROGRESS_FILE.tmp"
+    /bin/mv -f "\$PROGRESS_FILE.tmp" "\$PROGRESS_FILE"
+  fi
+}
 
 # 4. Download application payload on demand
-if ! /usr/bin/curl -fL --retry 3 --connect-timeout 15 --max-time 900 -o "\$ARCHIVE_PATH" "\$PAYLOAD_URL"; then
-  alert_error "Could not download \$PAYLOAD_NAME from GitHub Releases. Check your internet connection and verify release \$VERSION is published."
+write_progress "Downloading AfterShelf…"
+if [[ "\$NONINTERACTIVE" != "1" ]]; then
+  "\${0:A:h}/aftershelf-setup-progress" "\$PROGRESS_FILE" &
+  PROGRESS_PID=$!
 fi
 
+/usr/bin/curl -fsSL --retry 3 --connect-timeout 15 --max-time 900 \\
+  -D "\$WORK_DIR/headers" -o "\$ARCHIVE_PATH" "\$PAYLOAD_URL" &
+DOWNLOAD_PID=$!
+if [[ "\$NONINTERACTIVE" != "1" ]]; then
+  while kill -0 "\$DOWNLOAD_PID" 2>/dev/null; do
+    if [[ -f "\$ARCHIVE_PATH" ]]; then
+      RECEIVED="\$(/usr/bin/stat -f %z "\$ARCHIVE_PATH" 2>/dev/null || echo 0)"
+      TOTAL="\$(/usr/bin/awk '
+        /^HTTP\\// { length_bytes = 0; ok = \$2 == 200 }
+        ok && tolower(\$1) == "content-length:" && \$2 ~ /^[0-9]+\\r?$/ { length_bytes = \$2 + 0 }
+        END { printf "%.0f", length_bytes }
+      ' "\$WORK_DIR/headers")"
+      write_progress "Downloading AfterShelf…" "\$RECEIVED" "\$TOTAL"
+    fi
+    /bin/sleep 0.25
+  done
+fi
+if ! wait "\$DOWNLOAD_PID"; then
+  DOWNLOAD_PID=""
+  alert_error "Could not download \$PAYLOAD_NAME from GitHub Releases. Check your internet connection and verify release \$VERSION is published."
+fi
+DOWNLOAD_PID=""
+
 # 5. Verify SHA-256 checksum
+write_progress "Verifying download…"
 EXPECTED=""
 if [[ "\$TARGET_ARCH" == "\$BUILT_ARCH" ]] && [[ -n "\$EXPECTED_SHA256" ]]; then
   EXPECTED="\$EXPECTED_SHA256"
@@ -160,6 +216,7 @@ if [[ -n "\$EXPECTED" ]]; then
 fi
 
 # 6. Extract and validate bundle structure before replacing existing app
+write_progress "Extracting application…"
 /bin/mkdir -p "\$EXTRACT_DIR"
 if ! /usr/bin/ditto -x -k "\$ARCHIVE_PATH" "\$EXTRACT_DIR"; then
   alert_error "The downloaded archive could not be extracted."
@@ -170,6 +227,7 @@ if [[ ! -f "\$APP_BUNDLE/Contents/Info.plist" ]]; then
   alert_error "The downloaded archive did not contain a valid AfterShelf.app bundle."
 fi
 
+write_progress "Installing application…"
 STAGING_APP="\$DEST_DIR/.AfterShelf.app.staging.\$\$"
 /bin/rm -rf "\$STAGING_APP"
 /usr/bin/ditto "\$APP_BUNDLE" "\$STAGING_APP"
@@ -180,6 +238,7 @@ TARGET_APP="\$DEST_DIR/AfterShelf.app"
 /bin/mv "\$STAGING_APP" "\$TARGET_APP"
 
 if [[ "\$NONINTERACTIVE" != "1" ]]; then
+  stop_progress
   OPEN_CHOICE=\$(/usr/bin/osascript -e "button returned of (display dialog \\"AfterShelf \$VERSION has been installed in \$DEST_DIR.\\" buttons {\\"Done\\", \\"Open AfterShelf\\"} default button \\"Open AfterShelf\\" with title \\"AfterShelf Installed\\")" 2>/dev/null) || OPEN_CHOICE="Done"
   if [[ "\$OPEN_CHOICE" == "Open AfterShelf" ]]; then
     /usr/bin/open "\$TARGET_APP"
@@ -244,6 +303,17 @@ export async function buildMacBootstrap({
       await fs.writeFile(path.join(contentsDir, 'Info.plist'), installerInfoPlist(version, pkgVersion), 'utf8');
       const executable = path.join(macosDir, 'aftershelf-web-setup');
       await fs.writeFile(executable, installerScript({ version, arch, owner: publish.owner, repo: publish.repo, expectedSha256 }), { mode: 0o755 });
+      const progressSource = path.join(rootDir, 'scripts', 'mac-installer-progress.swift');
+      const progressExecutables = ['arm64', 'x86_64'].map(target => {
+        const output = path.join(staging, 'progress-' + target);
+        execFileSync('xcrun', [
+          'swiftc', '-O', '-target', target + '-apple-macosx12.0',
+          '-module-cache-path', path.join(staging, 'module-cache'),
+          progressSource, '-o', output
+        ]);
+        return output;
+      });
+      execFileSync('xcrun', ['lipo', '-create', ...progressExecutables, '-output', path.join(macosDir, 'aftershelf-setup-progress')]);
       await buildCompactIcns(assetsDir, path.join(resourcesDir, 'aftershelf.icns'));
       execFileSync('codesign', ['--force', '--deep', '--sign', '-', appDir], { stdio: 'ignore' });
 
