@@ -1,7 +1,7 @@
 import { ENGINES, ENGINE_NAMES, hasUpdate, canInstallArchive, versionKnown, versionRelation, isInstalled, canLaunchGame } from '../core/model.mjs';
 import { archiveTitle } from '../core/archive-names.mjs';
 import { configuredSources, sourceLabel, sourceId, sourceById } from '../core/sources.mjs';
-import { displayAppVersion, restartBlockReason } from '../core/app-updater.mjs';
+import { displayAppVersion as displayVersion, restartBlockReason } from '../core/app-update-state.mjs';
 
 const icons = {
   library: '<rect x="3" y="3" width="7" height="7" rx="1"/><rect x="14" y="3" width="7" height="7" rx="1"/><rect x="3" y="14" width="7" height="7" rx="1"/><rect x="14" y="14" width="7" height="7" rx="1"/>',
@@ -28,7 +28,6 @@ const icons = {
 };
 const icon = name => `<svg viewBox="0 0 24 24" aria-hidden="true">${icons[name] || icons.info}</svg>`;
 const e = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[char]);
-const displayVersion = displayAppVersion;
 const $ = selector => document.querySelector(selector);
 let state, runtime, browserState = { activeId: null, tabs: [] }, page = 'library', filter = 'all', search = '', view = localStorage.getItem('view') || 'grid', modalSubmit, toastTimer;
 let setup;
@@ -198,7 +197,7 @@ function render() {
   renderSourceStatus();
   $('#library-count').textContent = state.games.length;
   $('#downloads-count').textContent = state.downloads.filter(job=>job.status!=='installed').length;
-  $('#app-version').textContent = displayVersion(runtime.version).replace(/-alpha(?:\.\d+)?$/i,'');
+  $('#app-version').textContent = displayVersion(runtime.version);
   $('#platform-status').textContent = `${runtime.platform==='darwin'?'macOS':'Windows'} · ${runtime.arch}`;
   $('#folder-status').textContent = state.settings.gamesRoot || 'Choose a games folder to get started';
   $('#scan-status').innerHTML = `<span class="${state.scan.active?'spinning':''}">${icon('refresh')}</span><span>${e(state.scan.active?state.scan.message:state.scan.error?'Update check needs attention':state.scan.lastChecked?'Last checked '+time(state.scan.lastChecked):'Not checked yet')}</span>`;
