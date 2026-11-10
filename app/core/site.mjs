@@ -1,5 +1,7 @@
 import * as cheerio from 'cheerio';
 import { detectEngine, normalizeVersion } from './model.mjs';
+import { threadSuggestsJapaneseLocale } from './launch-locale.mjs';
+import { openingPostDownloads } from './thread-downloads.mjs';
 import { siteOrigin, threadReference } from './site-url.mjs';
 export { siteOrigin, threadReference } from './site-url.mjs';
 
@@ -58,7 +60,7 @@ function threadImages($, content, url) {
     .filter(value => { if (seen.has(value)) return false; seen.add(value); return true; }).slice(0, 4))
     .filter(values => values.length).slice(0, 40);
 }
-export function parseThread(html, url, origin) {
+export function parseThread(html, url, origin, { downloads = false } = {}) {
   const ref = threadReference(url, origin);
   const $ = cheerio.load(html);
   if ($('form[action*="login/login"]').length || /just a moment/i.test($('title').text())) throw new Error('Open Browse and sign in or complete the site check, then try again.');
@@ -76,11 +78,17 @@ export function parseThread(html, url, origin) {
   const wrapper = first.children('.bbWrapper').first();
   if (wrapper.length) first = wrapper;
   const content = first.clone();
+  if (downloads) {
+    content.find('button.bbCodeSpoiler-button').each((_i, button) => {
+      $(button).replaceWith($('<div>').text($(button).text().trim()));
+    });
+  }
   content.find('script, style, template, noscript, iframe, button, form, blockquote, .bbCodeBlock--quote, .message-signature, .message-lastEdit, .bbCodeBlock-expandLink, .lb-container, .lightboxContainer, .fancybox-container').remove();
   const textBody = content.clone(); textBody.find('br').replaceWith('\n');
   textBody.find('p, div, li, h1, h2, h3, h4, tr').append('\n');
   textBody.find('strong, b').each((_i, element) => { if (/^(?:overview|description|developer|creator|version|game version|engine|thread updated|release date|os|language|download|installation|changelog|pass|password|archive password|zip password|rar password)\s*:/i.test($(element).text().trim())) $(element).before('\n'); });
   const body = textBody.text().replace(/\r/g, '').replace(/[ \t]+\n/g, '\n').slice(0, 100000);
+  const threadPage = Number(/\/page-(\d+)\/?$/.exec(new URL(url, origin).pathname)?.[1] || 1);
   const fieldVersion = /(?:game\s+)?version\s*:\s*([^\n\r]+)/i.exec(body)?.[1]?.trim();
   const rawPassword = /(?:^|\n)\s*(?:(?:archive|zip|rar|7z|extraction|file|download)\s+)?pass(?:word)?\s*:\s*([^\n\r]+)/i.exec(body)?.[1]?.trim() || '';
   const cleanedPassword = rawPassword.replace(/^["'`]+|["'`]+$/g, '').trim().slice(0, 80);
@@ -95,7 +103,10 @@ export function parseThread(html, url, origin) {
   return { ...ref, title: fullTitle.replace(/\[[^\]]*\]/g, '').trim() || fullTitle,
     latestVersion: versionFromTitle(fullTitle) || fieldVersion?.slice(0, 100) || '',
     engine: detectEngine(tags.join(' ') + ' ' + fullTitle + ' ' + engineField), tags: tags.slice(0, 50),
-    description: overview.replace(/\s+/g, ' ').trim().slice(0, 400), changelog: changelog.slice(0, 1800), creator, archivePassword, coverUrl: coverCandidates[0] || '', coverCandidates, imageGroups, metadataParserVersion: 2, checkedAt: Date.now() };
+    description: overview.replace(/\s+/g, ' ').trim().slice(0, 400), changelog: changelog.slice(0, 1800), creator, archivePassword,
+    ...(first.length && threadPage === 1 ? { threadJapaneseLocale: threadSuggestsJapaneseLocale(body) } : {}),
+    ...(downloads ? { downloadOptions: threadPage === 1 ? openingPostDownloads($, content, ref.threadUrl) : [] } : {}),
+    coverUrl: coverCandidates[0] || '', coverCandidates, imageGroups, metadataParserVersion: 2, checkedAt: Date.now() };
 }
 export function parseLatest(payload) {
   const rows = payload?.msg?.data || payload?.data;
@@ -141,7 +152,13 @@ export function parseLatestHtml(html, origin) {
     const previous = entries.get(ref.threadId);
     if (!previous || !previous.version && entry.version || entry.title.length > previous.title.length && !previous.version) entries.set(ref.threadId, entry);
   });
-  if (!entries.size && !/\b(?:no|0)\s+(?:matching\s+)?(?:games|threads|results|items|updates|matches|entries)\b|nothing\s+(?:found|to show)|did(?:n['’]t|\s+not)\s+find\s+any/i.test((scope.length ? scope : $('body')).text())) throw new Error('No game thread listing was recognised. Check this source’s latest-updates URL and feed format in Settings.');
+  if (!entries.size) {
+    const content = (scope.length ? scope : $('body')).clone();
+    content.find('script, style, template, noscript').remove();
+    if (!/\b(?:no|0)\s+(?:matching\s+)?(?:games|threads|results|items|updates|matches|entries)\b|nothing\s+(?:found|to show)|did(?:n['’]t|\s+not)\s+find\s+any/i.test(content.text())) {
+      throw new Error('No game thread listing was recognised. Check this source’s latest-updates URL and feed format in Settings.');
+    }
+  }
   return [...entries.values()];
 }
 export function hostMatches(host, domain) { return host === domain || host.endsWith(`.${domain}`); }

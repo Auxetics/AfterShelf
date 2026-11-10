@@ -7,7 +7,8 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { Store } from './core/store.mjs';
-import { newGame, gameKey, ENGINES, ACTIVE_DOWNLOADS, canInstallArchive, offerInstallation, canLaunchGame, normalizedTitle, PLAY_STATUSES, hasUpdate, updateSkipped } from './core/model.mjs';
+import { newGame, gameKey, ENGINES, ACTIVE_DOWNLOADS, canInstallArchive, offerInstallation, canLaunchGame, normalizedTitle, PLAY_STATUSES, LAUNCH_LOCALES, hasUpdate, updateSkipped } from './core/model.mjs';
+import { isWindowsX86Executable, LOCALE_EMULATOR_PROFILE } from './core/launch-locale.mjs';
 import { parseThread, detectImageMime } from './core/site.mjs';
 import { safeName, exists, realDirectory, isInside, walk, assertNoLinks } from './core/files.mjs';
 import { savePlan, inspectInstallation, transferSaves } from './core/saves.mjs';
@@ -42,6 +43,7 @@ registerHtmlScheme();
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const uiFile = path.join(directory, 'ui', 'index.html');
+const localeEmulator = path.join(app.isPackaged ? process.resourcesPath : path.join(app.getAppPath(), '.cache'), 'locale-emulator', 'LEProc.exe');
 const profile = profileDirectory(app.getPath('appData'), existsSync);
 const threadGallery = new ThreadGallery(path.join(profile, 'thread-photos'));
 mkdirSync(profile, { recursive: true });
@@ -55,6 +57,7 @@ const activeItems = new Map(), operations = new Map();
 const watchNotifications = new Set();
 const detailOperations = new Set();
 let metadataRequests = Promise.resolve(), nextMetadataRequest = 0;
+let downloadPicker;
 const currentRuntime = () => ({
   version: app.getVersion(),
   platform: process.platform,
@@ -146,6 +149,34 @@ async function refreshLocalDetails(id) {
     if (!target || target.installation?.root !== root) return;
     applyLocalMetadata(target, metadata);
   });
+}
+async function gameUsesJapaneseLocale(game) {
+  if (process.platform !== 'win32' || game.launchLocale === 'default') return false;
+  const forced = game.launchLocale === 'ja-JP';
+  let suggested = game.installation.threadJapaneseLocale ?? game.threadJapaneseLocale;
+  if (!forced && (suggested === false || suggested === undefined && !game.threadUrl)) return false;
+  if (!await isWindowsX86Executable(game.installation.launch)) {
+    if (forced) throw new Error('Japanese locale mode requires a 32-bit Windows game executable. Choose System default in Edit details to launch this build.');
+    return false;
+  }
+  if (forced || suggested === true) return true;
+  // Existing library entries may predate locale detection. Read their opening post once.
+  const { id, origin, threadUrl } = game;
+  try {
+    const metadata = await metadataClient(origin).thread(threadUrl, { cover: false });
+    if (typeof metadata.threadJapaneseLocale === 'boolean') {
+      suggested = metadata.threadJapaneseLocale;
+      await store.update(state => {
+        const current = state.games.find(item => item.id === id);
+        if (sameThread(current, metadata) && current.threadJapaneseLocale === undefined) current.threadJapaneseLocale = suggested;
+      });
+    }
+  } catch (error) {
+    await store.log('Launch locale could not be checked', error.message);
+  }
+  const current = getGame(id);
+  return current.launchLocale === 'ja-JP' || current.launchLocale !== 'default' &&
+    (current.installation?.threadJapaneseLocale ?? current.threadJapaneseLocale) === true;
 }
 async function refreshDetails(id) {
   if (detailOperations.has(id)) throw new Error('Details are already being scanned for this game.');
@@ -427,6 +458,8 @@ async function install(id, mode = 'auto', fromDownload = false) {
       if (forumMetadata && !alternateDownload) applyForumMetadata(state, game.id, forumMetadata);
       const target = state.games.find(item => item.id === game.id);
       if (alternateDownload && forumMetadata) recordForumRelease(target, forumMetadata);
+      const alternateLocale = forumMetadata?.threadJapaneseLocale ?? job.thread?.threadJapaneseLocale;
+      if (alternateDownload && typeof alternateLocale === 'boolean') installation.threadJapaneseLocale = alternateLocale;
       if (original) target.previous.push(original);
       target.installation = installation; target.installedVersion = installation.version;
       target.availability = { status: 'available', reason: '', checkedAt: Date.now() };
@@ -668,6 +701,24 @@ const actions = {
   'check-source-status': id => checkSourceStatus({ store, id, client: metadataClient(sourceById(store.data.settings, id)) }),
   'browser-open-source': async id => { const source = sourceById(store.data.settings, id); await store.update(state => { state.settings.site = { ...source }; }); return browser.open(source.origin, null, true); },
   'browser-open': input => browser.open(text(input?.url) || store.data.settings.site.origin, input?.gameId || null, Boolean(input?.newTab)),
+  'game-download-options': async id => {
+    const game = getGame(id);
+    if (!game.threadUrl) return { options: [] };
+    const token = randomUUID();
+    const picker = { token, id, threadUrl: game.threadUrl, options: [] };
+    downloadPicker = picker;
+    const { downloadOptions, origin, threadId, threadUrl, title, engine, latestVersion, archivePassword, threadJapaneseLocale } =
+      await metadataClient(game.origin).thread(game.threadUrl, { cover: false, downloads: true });
+    picker.thread = { origin, threadId, threadUrl, title, engine, latestVersion, archivePassword, threadJapaneseLocale };
+    picker.options = downloadOptions || [];
+    return { token, options: picker.options.map(({ platform, label }, index) => ({ platform, label, index })) };
+  },
+  'browser-open-download-option': ({ token, index }) => {
+    const picker = downloadPicker;
+    if (!picker || picker.token !== token || !Number.isInteger(index) || !picker.options[index] ||
+      getGame(picker.id).threadUrl !== picker.threadUrl) throw new Error('These download options expired. Open the picker again.');
+    return browser.open(picker.options[index].url, picker.id, true, picker.thread);
+  },
   'browser-layout': input => browser.layout(input),
   'browser-command': input => browser.command(input),
   'browser-tab': input => browser.activate(Number(input)),
@@ -680,6 +731,13 @@ const actions = {
     return addMeta(await metadataClient(ref.origin).thread(ref.threadUrl));
   },
   'refresh-game-details': id => refreshDetails(id),
+  'game-gallery-preview': async id => {
+    const game = getGame(id);
+    if (!game.threadUrl) return [];
+    const ref = sourceThreadReference(store.data.settings, game.threadUrl);
+    const photos = await threadGallery.preview(ref);
+    return sameThread(getGame(id), ref) ? photos : [];
+  },
   'game-gallery': async ({ id, mode }) => {
     const game = getGame(id);
     if (!game.threadUrl) return { photos: [], hasMore: false, failed: 0 };
@@ -773,6 +831,7 @@ const actions = {
       if (['default', 'keep', 'previous', 'delete'].includes(input.retention)) game.retention = input.retention;
       if (typeof input.notes === 'string') game.notes = input.notes.trim().slice(0, 4000);
       if (PLAY_STATUSES.some(([status]) => status === input.playStatus)) game.playStatus = input.playStatus;
+      if (LAUNCH_LOCALES.some(([mode]) => mode === input.launchLocale)) game.launchLocale = input.launchLocale;
     });
   },
   'register-game': async input => {
@@ -787,7 +846,17 @@ const actions = {
     if (!canLaunchGame(game)) throw new Error(game.availability?.reason || 'Use Locate installed game to choose this game’s launch file first.');
     if (operations.has(id)) throw new Error('Wait for this game’s installation to finish.');
     const launchPath = game.installation.launch;
-    if (/\.html?$/i.test(launchPath)) {
+    const japaneseLocale = await gameUsesJapaneseLocale(game);
+    if (operations.has(id) || getGame(id).installation?.launch !== launchPath) throw new Error('The game installation changed. Try Play again.');
+    if (japaneseLocale) {
+      try { await fs.access(localeEmulator); }
+      catch { throw new Error('AfterShelf’s Locale Emulator is missing. Reinstall AfterShelf or choose System default in Edit details.'); }
+      await new Promise((resolve, reject) => {
+        const child = spawn(localeEmulator, ['-runas', LOCALE_EMULATOR_PROFILE, launchPath], { cwd: path.dirname(localeEmulator), detached: true, stdio: 'ignore' });
+        child.once('error', reject);
+        child.once('spawn', () => { child.unref(); resolve(); });
+      });
+    } else if (/\.html?$/i.test(launchPath)) {
       if (htmlGameOpen(id)) { await launchHtmlGame(game); return; }
       await launchHtmlGame(game, session => {
         void store.update(state => { const target = state.games.find(item => item.id === id); if (target) recordHtmlSession(target, session); })
@@ -836,6 +905,35 @@ const actions = {
     const game = getGame(id);
     if (!game.threadUrl) throw new Error('Link a forum thread before watching for releases.');
     return store.update(() => { game.watching = !game.watching; if (game.watching) recordForumRelease(game, game); });
+  },
+  'bulk-edit-games': async ({ ids, playStatus, watch, tagMode, tags }) => {
+    if (!Array.isArray(ids) || !ids.length || ids.some(id => typeof id !== 'string')) throw new Error('Select games first.');
+    const selection = new Set(ids);
+    const games = store.data.games.filter(game => selection.has(game.id));
+    if (!games.length) throw new Error('The selected games are no longer in the library.');
+    const result = { changed: 0, skipped: selection.size - games.length };
+    const tagList = typeof tags === 'string' ? [...new Set(tags.split(',').map(tag => tag.trim().slice(0, 60)).filter(Boolean))] : [];
+    const validStatus = PLAY_STATUSES.some(([status]) => status === playStatus);
+    const editTags = ['add', 'remove'].includes(tagMode) && tagList.length;
+    if ([validStatus, typeof watch === 'boolean', Boolean(editTags)].filter(Boolean).length !== 1) throw new Error('Choose one change to apply.');
+    await store.update(() => {
+      for (const game of games) {
+        if (validStatus) game.playStatus = playStatus;
+        if (editTags) {
+          const current = game.personalTags || [];
+          const keys = new Set(tagList.map(tag => tag.toLowerCase()));
+          game.personalTags = tagMode === 'remove' ? current.filter(tag => !keys.has(tag.toLowerCase()))
+            : [...new Map([...tagList, ...current].map(tag => [tag.toLowerCase(), tag])).values()].slice(0, 50);
+        }
+        if (typeof watch === 'boolean') {
+          if (watch && !game.threadUrl) { result.skipped++; continue; }
+          if (watch && !game.watching) recordForumRelease(game, game);
+          game.watching = watch;
+        }
+        result.changed++;
+      }
+    });
+    return result;
   },
   'storage-by-drive': () => storageByDrive(store.snapshot(), gamesFolders(store.data.settings)),
   'toggle-favorite': id => {

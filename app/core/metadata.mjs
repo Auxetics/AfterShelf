@@ -57,7 +57,11 @@ export function applyForumMetadata(state, id, metadata, { onWatchedRelease, now 
   if (state.games.some(item => item.id !== id && sameThread(item.alternateThread, metadata))) throw new Error('That thread is an alternate link on another game.');
   const duplicate = state.games.find(item => item.id !== id && item.origin === metadata.origin && item.threadId === metadata.threadId);
   if (duplicate?.installation && duplicate.installation.root !== game.installation?.root) throw new Error('That thread already belongs to another installed game. Remove the duplicate library entry or choose another thread first.');
-  if (game.origin !== metadata.origin || String(game.threadId) !== String(metadata.threadId)) { delete game.lastFeedFingerprint; delete game.versionVerifiedAt; }
+  if (game.origin !== metadata.origin || String(game.threadId) !== String(metadata.threadId)) {
+    delete game.lastFeedFingerprint;
+    delete game.versionVerifiedAt;
+    delete game.threadJapaneseLocale;
+  }
   if (game.alternateThread?.origin === metadata.origin) {
     game.alternateThread = game.threadUrl && game.origin !== metadata.origin
       ? { origin: game.origin, threadId: game.threadId, threadUrl: game.threadUrl } : null;
@@ -70,6 +74,7 @@ export function applyForumMetadata(state, id, metadata, { onWatchedRelease, now 
   for (const key of ['origin', 'threadId', 'threadUrl', 'title', 'latestVersion', 'description', 'creator', 'archivePassword', 'tags', 'checkedAt', 'metadataParserVersion']) {
     if (metadata[key] != null) game[key] = metadata[key];
   }
+  if (typeof metadata.threadJapaneseLocale === 'boolean') game.threadJapaneseLocale = metadata.threadJapaneseLocale;
   if (!game.coverPinned) {
     if (metadata.cover) {
       game.cover = metadata.cover;

@@ -4,13 +4,14 @@
 
 An experimental desktop library for games distributed through F95 and LewdCorner. Browse forum threads, download from a host you choose, track new releases, install full ZIP releases, transfer engine-specific saves/preferences, inspect or edit save copies, and launch your games.
 
-**Alpha software:** engine profiles use general save-location rules. Report compatibility problems with the platform, engine, app version and redacted text diagnostics from Activity. Real-game update testing is ongoing.
+**Beta software:** engine profiles use general save-location rules. Report compatibility problems with the platform, engine, app version and redacted text diagnostics from Activity. Real-game update testing is ongoing.
 
 ## Key features
 
 ### Library organization & privacy
 - **Rich filtering & sorting:** Filter by status (`All games`, `Updates`, `In progress`, `Installed`, `Not installed`, `Needs attention`), source (`LC`, `F95`, `Local`), engine, scraped forum tags, play status (`Backlog`, `Playing`, `On hold`, `Completed`, `Dropped`), favorites, and watched releases. Sort by newest/oldest added, title A–Z/Z–A, recently installed, or last played/launched.
 - **Saved views:** Save custom filter and sort combinations as named presets for one-click access.
+- **Bulk editing:** Open **Library → ⋯ → Select games** to change play status, add or remove personal tags, or manage release watches for multiple games.
 - **Privacy mode (`Ctrl/⌘ + Shift + P`):** Cycle between normal display, blurred covers, and hidden titles/descriptions/notes across the library and detail modals.
 - **Portable library export & import:** Export your collection (games, primary and alternate forum thread links, tags, personal notes, archive passwords, play status, favorite/watch flags, release history, and playtime) to a portable `.json` file and merge it into another setup without overwriting local installations.
 
@@ -21,6 +22,7 @@ An experimental desktop library for games distributed through F95 and LewdCorner
 - **Thread photo gallery & custom covers:** View opening-post screenshots in a paginated lightbox gallery (supporting PNG, JPEG, WebP, GIF, and AVIF) and pin any thread photo as the game's library cover.
 - **Release timeline & watch notifications:** View discovered versions and changelogs in the `What's new` tab, skip specific versions, or enable desktop release notifications for watched games.
 - **Archive password scraping:** Automatically extracts archive passwords (`Password: ...`) from thread posts and surfaces a one-click **Copy password** button in Downloads and game details.
+- **Update download picker:** **Get update** shows platform builds and mirror links recognized in the opening post. Choose a mirror in Browse or open the full thread.
 
 ### Installation, versions, saves & playtime
 - **Direct folder installation & preflight checks:** Extracts ZIP releases directly into clean game folders inside your configured games directory after checking free disk space against uncompressed archive size. Supports multiple games folders across drives with per-drive storage breakdowns.
@@ -28,15 +30,16 @@ An experimental desktop library for games distributed through F95 and LewdCorner
 - **One-click version rollback:** Switch back to any retained previous version in `Versions & storage` while automatically transferring your latest saves and preferences.
 - **Save inventory & copy editor:** Inspect detected local and external save locations, add custom save folders, and edit primitive variables in **Ren'Py** (`.save`), **RPG Maker MV** (`.rpgsave`), and **RPG Maker MZ** (`.rmmzsave`) saves—exporting modified copies safely without mutating the original slot.
 - **Built-in HTML player & native playtime tracking:** Launch HTML games in a dedicated sandboxed window (with isolated session storage and optional system-browser launch) and track session durations and per-version playtime across both HTML and native (`.app`, `.exe`, `.sh`) games.
+- **Japanese locale on Windows:** AfterShelf bundles Locale Emulator for supported 32-bit games. Play follows instructions found in the opening post by default, with a per-game override in Edit details. Emulated launches do not record session duration.
 
 ## Downloads and builds
 
-GitHub Actions builds **macOS Apple Silicon (ARM64), macOS Intel (x64), and Windows Intel/AMD (x64)** on every push to `main`, pull request and manual workflow run. Download the architecture-specific packages from [Actions](https://github.com/Auxetics/AfterShelf/actions). Version tags matching `package.json` publish a GitHub prerelease after all three builds succeed.
+GitHub Actions builds **macOS Apple Silicon (ARM64), macOS Intel (x64), and Windows Intel/AMD (x64)** on every push to `main`, pull request and manual workflow run. Download released installers from [GitHub Releases](https://github.com/Auxetics/AfterShelf/releases). After all three builds succeed, the main workflow stages the packages in the matching draft release.
 
 - macOS: Lightweight Web Setup `.dmg` bootstrap installer plus its separate `.zip` application payload, which can also be used directly.
 - Windows: Lightweight Web Setup `.exe` bootstrap installer plus its separate `.nsis.7z` application payload.
 - Both Web Setup installers check system requirements/architecture and download their runtime payload from the corresponding GitHub release during installation instead of pre-packaging the full runtime in the installer itself. For untagged build artifacts, use the `.zip` package until the matching release is published.
-- These alpha packages are not signed with a publisher certificate or notarized. At launch, AfterShelf checks GitHub Releases for newer versions, downloads the update in the background, and displays a top-bar restart button once ready (blocked while any downloads, game updates, syncs or scans are active).
+- These beta packages are not signed with a publisher certificate or notarized. At launch, AfterShelf checks GitHub Releases for newer versions, downloads the update in the background, and displays a top-bar restart button once ready (blocked while any downloads, game updates, syncs or scans are active).
 
 ## Using AfterShelf
 
@@ -78,7 +81,7 @@ npm run dist:mac
 npm run dist:win
 ```
 
-The GitHub matrix builds each architecture separately on a matching host and stages its packages into the `0.*-Alpha` draft release on GitHub. Publisher signing/notarization is a separate distribution task.
+The GitHub matrix builds each architecture separately and uses the same release name for the installer, its payload, and the draft release.
 
 ## Privacy and local files
 
@@ -86,10 +89,10 @@ The application keeps its library and Chromium login/session storage in the oper
 
 The repository excludes library databases, cookies/session stores, local credentials, signing keys, diagnostic exports, downloaded games and local test output. Application packages contain the application source/assets, not profiles or tests. Diagnostics can be copied or saved as `.txt`; cookies, credentials, signed query strings and home-directory names are redacted. Nothing is uploaded automatically.
 
-## Known alpha limits
+## Known beta limits
 
 - Save profiles are general engine rules; a game's customised layout or changed save format may need manual handling. Ren'Py and RPG Maker rules have the most fixture coverage.
 - Save editing exports a separate `.save` / `.rpgsave` / `.rmmzsave` copy and only modifies primitive values (`store.*` booleans, numbers, and strings in Ren'Py; gold, variables, and switches in RPG Maker MV/MZ).
 - External extraction completion may require output selection. The external app may continue after AfterShelf closes.
 - Remove from Library first confirms removal, then offers Keep files or permanent deletion of the current/retained installation folders, including local saves. Downloads and save data outside the deleted installation folders remain. Kept folders are excluded from automatic startup discovery; a manual scan can re-import them.
-- Live provider compatibility and complete real-game update/save cycles still need testing. The alpha does not provide automated file-host bypasses, a torrent client, patch installation or save-format conversion.
+- Live provider compatibility and complete real-game update/save cycles still need testing. AfterShelf does not provide automated file-host bypasses, a torrent client, patch installation or save-format conversion.

@@ -34,7 +34,12 @@ export class ForumBrowser {
     this.session = session.fromPartition('persist:forum');
     this.session.setPermissionRequestHandler((_web, _permission, callback) => callback(false));
     this.session.setPermissionCheckHandler(() => false);
-    this.session.on('will-download', (_event, item, contents) => { if (this.metadataContents.has(contents?.id)) { item.cancel(); return; } const source = this.views.get(contents?.id); onDownload(item, source?.gameId || null, source?.thread ? structuredClone(source.thread) : null); });
+    this.session.on('will-download', (_event, item, contents) => {
+      if (this.metadataContents.has(contents?.id)) { item.cancel(); return; }
+      const source = this.views.get(contents?.id);
+      if (source) source.startedDownload = true;
+      onDownload(item, source?.gameId || null, source?.thread ? structuredClone(source.thread) : null);
+    });
     this.session.webRequest.onBeforeRequest((details, callback) => {
       let blocked = false;
       try { blocked = this.store.data.settings.site.blockedHosts.some(domain => hostMatches(new URL(details.url).hostname, domain)); } catch {}
@@ -106,13 +111,21 @@ export class ForumBrowser {
       if (active || this.activeId === null) this.activate(wc.id); else this.publish();
       return tab;
   }
-  async open(url, gameId = null, newTab = false) {
+  async open(url, gameId = null, newTab = false, thread = null) {
     if (!httpUrl(url)) throw new Error('Only HTTP and HTTPS addresses can be opened in Browse.');
     const current = newTab || !this.activeId || !this.views.has(this.activeId) ? this.createTab({ gameId }) : this.views.get(this.activeId);
-    current.gameId = gameId; current.url = url; current.error = '';
+    current.gameId = gameId; current.url = url; current.error = ''; current.startedDownload = false;
     const game = this.store.data.games.find(game => game.id === gameId);
     if (game?.threadUrl) { current.thread = { origin: game.origin, threadId: game.threadId, threadUrl: game.threadUrl, title: game.title, engine: game.engine, latestVersion: game.latestVersion }; try { current.sourceId = sourceForUrl(this.store.data.settings, game.threadUrl).id; } catch {} }
-    try { await current.view.webContents.loadURL(url); } catch (error) { current.error = 'The page did not finish loading. Reload or check the address.'; this.publish(); }
+    else current.thread = null;
+    if (thread) current.thread = thread;
+    const sameOrigin = thread && new URL(url).origin === thread.origin;
+    try { await current.view.webContents.loadURL(url, sameOrigin ? { httpReferrer: thread.threadUrl } : {}); }
+    catch (error) {
+      if (error.code !== 'ERR_ABORTED' || !current.startedDownload) {
+        current.error = 'The page did not finish loading. Reload or check the address.'; this.publish();
+      }
+    }
     return this.state();
   }
   detach() {

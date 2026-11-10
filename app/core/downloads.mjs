@@ -12,12 +12,14 @@ export function ensureDownloadGame(state, { gameId, thread, create } = {}) {
   let game = state.games.find(item => item.id === gameId && (!ref || gameMatchesThread(item, ref)));
   if (game) {
     if (supplied?.archivePassword && !game.archivePassword) game.archivePassword = String(supplied.archivePassword).slice(0, 80);
+    if (sameThread(game, ref) && typeof supplied?.threadJapaneseLocale === 'boolean') game.threadJapaneseLocale = supplied.threadJapaneseLocale;
     return game;
   }
   if (ref) {
     game = state.games.find(item => gameMatchesThread(item, ref));
     if (game) {
       if (supplied?.archivePassword && !game.archivePassword) game.archivePassword = String(supplied.archivePassword).slice(0, 80);
+      if (sameThread(game, ref) && typeof supplied?.threadJapaneseLocale === 'boolean') game.threadJapaneseLocale = supplied.threadJapaneseLocale;
       return game;
     }
   }
@@ -27,6 +29,7 @@ export function ensureDownloadGame(state, { gameId, thread, create } = {}) {
   const engine = ENGINES.some(([id]) => id === supplied?.engine) ? supplied.engine : 'custom';
   game = newGame({ ...(ref || { id: `download:${randomUUID()}`, origin: state.settings.site.origin, threadId: '', threadUrl: '' }), title, engine,
     latestVersion: String(supplied?.latestVersion || supplied?.version || '').trim().slice(0, 100),
+    ...(ref && typeof supplied?.threadJapaneseLocale === 'boolean' ? { threadJapaneseLocale: supplied.threadJapaneseLocale } : {}),
     ...(supplied?.archivePassword ? { archivePassword: String(supplied.archivePassword).slice(0, 80) } : {}) });
   state.games.unshift(game);
   return game;

@@ -69,4 +69,9 @@ export class ThreadGallery {
     const cache = await this.#read(this.#file(ref));
     return photoId ? cache?.photos.find(photo => photo.id === photoId) : cache?.photos[0];
   }
+
+  async preview(ref) {
+    const cache = await this.#read(this.#file(ref));
+    return cache?.photos.slice(0, 3) || [];
+  }
 }

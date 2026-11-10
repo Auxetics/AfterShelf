@@ -54,6 +54,7 @@ export function newGame(meta) {
     installation: null, previous: [], saveOverrides: [], retention: 'default', ...meta };
 }
 export const PLAY_STATUSES = [['backlog', 'Backlog'], ['playing', 'Playing'], ['finished', 'Finished']];
+export const LAUNCH_LOCALES = [['auto', 'Auto (from forum)'], ['default', 'System default'], ['ja-JP', 'Japanese (Japan)']];
 export function normalizeVersion(value) { return String(value ?? '').trim().replace(/^v(?=\d)/i, ''); }
 export function versionKnown(value) { return typeof value === 'string' && Boolean(value.trim()) && !/^(?:unknown|unspecified|n\/?a)$/i.test(value.trim()); }
 export function versionRelation(installed, current) {

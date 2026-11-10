@@ -8,6 +8,7 @@ import os from 'node:os';
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import { displayAppVersion } from '../app/core/app-update-state.mjs';
 
 const rootDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -278,7 +279,7 @@ export async function buildMacBootstrap({
   if (process.platform !== 'darwin') throw new Error('macOS bootstrap installer creation requires macOS.');
   const pkg = JSON.parse(await fs.readFile(packageJsonPath, 'utf8'));
   const pkgVersion = pkg.version;
-  const version = pkgVersion.replace(/^(\d+\.\d+)\.0(-Alpha.*)$/i, '$1$2');
+  const version = displayAppVersion(pkgVersion);
   const publish = pkg.build?.publish?.[0] || { owner: 'Auxetics', repo: 'AfterShelf' };
   await fs.mkdir(releaseDir, { recursive: true });
 

@@ -12,6 +12,12 @@ function updateTime(row, now) {
   const value = Number(row.updatedAt);
   return Number.isFinite(value) && value >= Date.UTC(2000, 0, 1) && value <= now + 300000 ? value : 0;
 }
+function updateResultLabel({ updates, different, unknownInstalled }, hasEmptyFeed = false) {
+  if (updates) return `${updates} update${updates === 1 ? '' : 's'} available`;
+  if (different) return `${different} version${different === 1 ? ' differs' : 's differ'}`;
+  if (hasEmptyFeed) return 'No known updates';
+  return unknownInstalled ? 'No updates found for known versions' : 'No updates found';
+}
 export async function checkLibraryUpdates({ onWatchedRelease, store, client, full = false, now = Date.now, maxPages = 20, recheckAfter = 86400000, maxRechecks = 5 }) {
   if (store.data.scan.active) return { busy: true };
   const site = structuredClone(store.data.settings.site), startedAt = now();
@@ -21,9 +27,10 @@ export async function checkLibraryUpdates({ onWatchedRelease, store, client, ful
   const summary = { mode: 'feed', pages: 0, entries: 0, linked: games.length, verified: 0, failed: 0,
     unlinked: store.data.games.filter(game => !game.threadId || !game.threadUrl).length,
     unknownInstalled: games.filter(game => game.installation && !versionKnown(game.installedVersion)).length,
-    updates: 0, different: 0, full, checkpointAdvanced: false, stopReason: '', reconciledAll: false };
+    updates: 0, different: 0, full, feedStatus: 'unchecked', checkpointAdvanced: false, stopReason: '', reconciledAll: false };
   await store.update(state => Object.assign(state.scan, { active: true, message: 'Checking recent updates…', error: '', summary }));
   if (!games.length) {
+    summary.statusText = 'No linked games to check';
     await store.update(state => Object.assign(state.scan, { active: false, message: 'No linked games to check. Use Find forum match first.', summary }));
     return { ...summary, message: store.data.scan.message, error: '' };
   }
@@ -41,8 +48,9 @@ export async function checkLibraryUpdates({ onWatchedRelease, store, client, ful
         await store.update(state => { state.scan.message = `Checking recent updates · page ${page}`; });
         const entries = await client.latestPage(page); summary.pages++;
         if (page === 1) {
+          summary.feedStatus = entries.length ? 'read' : 'empty';
           head = [...new Set(entries.map(feedFingerprint))].slice(0, 200);
-          if (!entries.length) throw new Error('The latest feed returned no game entries. Check the endpoint and login in Browse.');
+          if (!head.length) { summary.stopReason = 'empty-feed'; complete = true; break; }
         }
         rows.push(...entries); summary.entries += entries.length;
         let added = 0;
@@ -56,7 +64,12 @@ export async function checkLibraryUpdates({ onWatchedRelease, store, client, ful
         const reason = !entries.length || paginated && entries.length < pageSize ? 'listing-ended' : !added ? 'repeated-page' : oldDates ? 'saved-date-boundary' : '';
         if (reason) { reconcileAll = true; summary.stopReason = reason; complete = true; break; }
       }
-    } catch (error) { if (!full) throw error; errors.push(`Latest feed unavailable: ${error.message}`); }
+    } catch (error) {
+      summary.feedStatus = 'unavailable';
+      const detail = `Could not read the latest feed: ${error.message}`;
+      if (!full) throw new Error(detail);
+      errors.push(detail);
+    }
     // A lost frontier must not create a permanent retry loop. Verify the linked
     // games once to close the gap, then commit the new first-page marker.
     if (!complete && !errors.length) { reconcileAll = true; summary.stopReason = 'pagination-budget'; }
@@ -95,15 +108,23 @@ export async function checkLibraryUpdates({ onWatchedRelease, store, client, ful
         if (entries && entries.every(row => versionKnown(row.version) && normalizeVersion(row.version) === normalizeVersion(game.latestVersion))) game.lastFeedFingerprint = observedFingerprint(entries);
       }
       if (!errors.length) {
-        state.checkpoints[site.origin] = { revision: 2, head, at: startedAt, newestUpdatedAt: Math.max(0, ...rows.map(row => updateTime(row, startedAt))) };
-        summary.checkpointAdvanced = true; state.scan.lastChecked = now();
+        // An empty response supplies no marker for a later incremental scan.
+        if (head.length) {
+          state.checkpoints[site.origin] = { revision: 2, head, at: startedAt, newestUpdatedAt: Math.max(0, ...rows.map(row => updateTime(row, startedAt))) };
+          summary.checkpointAdvanced = true;
+        }
+        state.scan.lastChecked = now();
       }
     });
   } catch (error) { errors.push(error.message); }
   const current = store.data.games.filter(game => game.origin === site.origin && game.threadId && game.threadUrl);
   summary.updates = current.filter(game => game.installation && !updateSkipped(game) && versionRelation(game.installedVersion, game.latestVersion) === 'newer').length;
   summary.different = current.filter(game => game.installation && !updateSkipped(game) && versionRelation(game.installedVersion, game.latestVersion) === 'different').length;
-  const message = `${errors.length ? 'Update check incomplete' : 'Checked latest feed'} · ${summary.pages} pages / ${summary.entries} entries · ${summary.verified} threads refreshed${summary.reconciledAll ? ' · catch-up completed' : ''} · ${summary.updates} updates${summary.different ? ` · ${summary.different} versions differ` : ''}${summary.unlinked ? ` · ${summary.unlinked} unlinked` : ''}${summary.unknownInstalled ? ` · ${summary.unknownInstalled} installed versions unknown` : ''}`;
+  const feedResult = summary.feedStatus === 'empty' ? 'Latest feed returned no entries' : 'Checked latest feed';
+  const label = updateResultLabel(summary, summary.feedStatus === 'empty');
+  summary.statusText = errors.length ? (summary.feedStatus === 'unavailable' ? 'Could not read the latest feed' : 'Update check incomplete')
+    : summary.feedStatus === 'empty' ? `Feed empty · ${label}` : label;
+  const message = `${errors.length ? summary.statusText : feedResult} · ${summary.pages} pages / ${summary.entries} entries · ${summary.verified} threads refreshed${!errors.length && summary.reconciledAll ? ' · catch-up completed' : ''}${errors.length ? '' : ` · ${label}`}${summary.unlinked ? ` · ${summary.unlinked} unlinked` : ''}${summary.unknownInstalled ? ` · ${summary.unknownInstalled} installed versions unknown` : ''}`;
   await store.update(state => Object.assign(state.scan, { active: false, message, error: errors.join('\n'), summary }));
   if (errors.length) await store.log('Update check incomplete', errors.join('\n'));
   return { ...summary, message, error: errors.join('\n') };
@@ -144,7 +165,18 @@ export async function checkAllSourceUpdates({ store, clientForSource, full = fal
     }
   } catch (error) { errors.push(error.message); }
   const summary = { mode: 'feed', sources: results, pages: results.reduce((n, result) => n + (result.pages || 0), 0), entries: results.reduce((n, result) => n + (result.entries || 0), 0), verified: results.reduce((n, result) => n + (result.verified || 0), 0), updates: store.data.games.filter(game => game.installation && !updateSkipped(game) && versionRelation(game.installedVersion, game.latestVersion) === 'newer').length, unlinked: store.data.games.length - linked.length, full };
-  const message = !sites.length && !unmapped ? 'No linked games to check. Use Find forum match first.' : `${errors.length ? 'Update check incomplete' : 'Checked game sources'} · ${summary.pages} pages / ${summary.entries} entries · ${summary.verified} threads verified · ${summary.updates} updates`;
+  summary.different = results.reduce((n, result) => n + result.different, 0);
+  summary.unknownInstalled = results.reduce((n, result) => n + result.unknownInstalled, 0);
+  const emptyFeeds = results.filter(result => result.feedStatus === 'empty').map(result => result.name);
+  const unreadableFeeds = results.filter(result => result.feedStatus === 'unavailable').map(result => result.name);
+  const label = updateResultLabel(summary, emptyFeeds.length > 0);
+  const emptyLabel = emptyFeeds.length ? `${emptyFeeds.join(' and ')} ${emptyFeeds.length === 1 ? 'feed' : 'feeds'} empty` : '';
+  const noLinked = !sites.length && !unmapped;
+  summary.statusText = noLinked ? 'No linked games to check'
+    : errors.length ? unreadableFeeds.length ? `Could not read ${unreadableFeeds.join(' or ')} update feed${unreadableFeeds.length === 1 ? '' : 's'}` : 'Update check incomplete'
+    : [emptyLabel, label].filter(Boolean).join(' · ');
+  const message = noLinked ? 'No linked games to check. Use Find forum match first.'
+    : [errors.length ? summary.statusText : 'Checked game sources', emptyLabel, `${summary.pages} pages / ${summary.entries} entries`, `${summary.verified} threads verified`, errors.length ? '' : label].filter(Boolean).join(' · ');
   await store.update(state => { Object.assign(state.scan, { active: false, message, error: errors.join('\n'), summary }); if (sites.length && !errors.length) state.scan.lastChecked = now(); });
   return { ...summary, message, error: errors.join('\n') };
 }

@@ -6,6 +6,7 @@ export function openGalleryViewer(dialog, gallery, index, { loadMore, restoreFoc
   const strip = find('.gallery-strip');
   const more = find('.viewer-more');
   const status = find('.gallery-viewer-status');
+  const indicator = status.firstElementChild, statusText = status.lastElementChild;
   const previous = find('.viewer-prev'), next = find('.viewer-next');
   const thumbnails = [];
   const listeners = new AbortController();
@@ -17,7 +18,8 @@ export function openGalleryViewer(dialog, gallery, index, { loadMore, restoreFoc
     const photo = gallery.photos[index];
     if (image.getAttribute('src') !== photo.src) image.src = photo.src;
     image.alt = 'Thread photo ' + (index + 1);
-    status.textContent = loading ? 'Loading more photos…' : error || `Photo ${index + 1} of ${gallery.photos.length}`;
+    indicator.hidden = !loading;
+    statusText.textContent = loading ? 'Loading more photos…' : error || `Photo ${index + 1} of ${gallery.photos.length}`;
     previous.setAttribute('aria-disabled', String(index === 0 || loading));
     next.setAttribute('aria-disabled', String(loading || (index === gallery.photos.length - 1 && !gallery.hasMore)));
     more.hidden = !gallery.hasMore;

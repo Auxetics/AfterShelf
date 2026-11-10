@@ -1,7 +1,7 @@
 {
   "name": "aftershelf",
   "productName": "AfterShelf",
-  "version": "0.9.0-Alpha",
+  "version": "1.0.0-Beta",
   "description": "A local desktop game library with forum browsing and save-aware updates.",
   "private": true,
   "type": "module",
@@ -43,6 +43,7 @@
       "package.json"
     ],
     "asar": true,
+    "beforePack": "./scripts/stage-locale-emulator.mjs",
     "mac": {
       "category": "public.app-category.games",
       "icon": "app/assets/aftershelf.icns",
@@ -54,6 +55,12 @@
     },
     "win": {
       "icon": "app/assets/aftershelf.ico",
+      "extraResources": [
+        {
+          "from": ".cache/locale-emulator",
+          "to": "locale-emulator"
+        }
+      ],
       "target": [
         "nsis-web"
       ]
@@ -61,10 +68,10 @@
     "nsisWeb": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "artifactName": "AfterShelf-Web-Setup-0.9-Alpha-${os}-${arch}.${ext}",
-      "appPackageUrl": "https://github.com/Auxetics/AfterShelf/releases/download/0.9-Alpha/aftershelf-0.9.0-Alpha-x64.nsis.7z"
+      "artifactName": "AfterShelf-Web-Setup-1.0-Beta-${os}-${arch}.${ext}",
+      "appPackageUrl": "https://github.com/Auxetics/AfterShelf/releases/download/1.0-Beta/aftershelf-1.0.0-Beta-x64.nsis.7z"
     },
-    "artifactName": "AfterShelf-0.9-Alpha-${os}-${arch}.${ext}",
+    "artifactName": "AfterShelf-1.0-Beta-${os}-${arch}.${ext}",
     "publish": [
       {
         "provider": "github",

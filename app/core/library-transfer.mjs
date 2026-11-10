@@ -1,4 +1,4 @@
-import { ENGINES, PLAY_STATUSES, newGame } from './model.mjs';
+import { ENGINES, PLAY_STATUSES, LAUNCH_LOCALES, newGame } from './model.mjs';
 import { sameThread, sourceThreadReference } from './sources.mjs';
 
 export function exportLibraryPayload(state) {
@@ -15,9 +15,11 @@ export function exportLibraryPayload(state) {
     creator: game.creator || '',
     description: game.description || '',
     tags: Array.isArray(game.tags) ? game.tags : [],
+    personalTags: Array.isArray(game.personalTags) ? game.personalTags : [],
     archivePassword: game.archivePassword || '',
     notes: game.notes || '',
     playStatus: game.playStatus || 'backlog',
+    launchLocale: game.launchLocale || 'auto',
     favorite: Boolean(game.favorite),
     watching: Boolean(game.watching),
     skippedUpdate: game.skippedUpdate || null,
@@ -59,6 +61,10 @@ export function importLibraryPayload(state, payload) {
     }
     const engine = ENGINES.some(([id]) => id === raw.engine) ? raw.engine : 'custom';
     const playStatus = PLAY_STATUSES.some(([id]) => id === raw.playStatus) ? raw.playStatus : 'backlog';
+    const launchLocale = LAUNCH_LOCALES.some(([id]) => id === raw.launchLocale) ? raw.launchLocale : 'auto';
+    const personalTags = Array.isArray(raw.personalTags)
+      ? raw.personalTags.filter(tag => typeof tag === 'string').map(tag => tag.trim().slice(0, 60)).filter(Boolean).slice(0, 50)
+      : [];
     const existing = state.games.find(game => (ref && sameThread(game, ref)) || (typeof raw.id === 'string' && game.id === raw.id));
     if (existing) {
       if (ref && !existing.threadId) Object.assign(existing, ref);
@@ -67,6 +73,11 @@ export function importLibraryPayload(state, payload) {
       if (!existing.description && typeof raw.description === 'string') existing.description = raw.description.slice(0, 400);
       if (!existing.archivePassword && typeof raw.archivePassword === 'string') existing.archivePassword = raw.archivePassword.slice(0, 120);
       if (!existing.notes && typeof raw.notes === 'string') existing.notes = raw.notes.slice(0, 4000);
+      if (!existing.launchLocale && launchLocale !== 'auto') existing.launchLocale = launchLocale;
+      if (personalTags.length) {
+        const all = [...personalTags, ...(existing.personalTags || [])];
+        existing.personalTags = [...new Map(all.map(tag => [tag.toLowerCase(), tag])).values()].slice(0, 50);
+      }
       if (Array.isArray(raw.tags) && raw.tags.length) {
         const mergedTags = [...new Set([...(Array.isArray(existing.tags) ? existing.tags : []), ...raw.tags.filter(t => typeof t === 'string').map(t => t.slice(0, 60))])];
         existing.tags = mergedTags.slice(0, 50);
@@ -93,9 +104,11 @@ export function importLibraryPayload(state, payload) {
       creator: typeof raw.creator === 'string' ? raw.creator.slice(0, 200) : '',
       description: typeof raw.description === 'string' ? raw.description.slice(0, 400) : '',
       tags: Array.isArray(raw.tags) ? raw.tags.filter(t => typeof t === 'string').map(t => t.slice(0, 60)).slice(0, 50) : [],
+      personalTags,
       archivePassword: typeof raw.archivePassword === 'string' ? raw.archivePassword.slice(0, 120) : '',
       notes: typeof raw.notes === 'string' ? raw.notes.slice(0, 4000) : '',
       playStatus,
+      launchLocale,
       favorite: Boolean(raw.favorite),
       watching: Boolean(raw.watching && ref),
       releases: Array.isArray(raw.releases) ? raw.releases.slice(0, 120) : [],

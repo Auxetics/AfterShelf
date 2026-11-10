@@ -6,8 +6,8 @@ on:
   pull_request:
   workflow_dispatch:
     inputs:
-      publish_alpha:
-        description: Upload packages to the matching draft alpha release
+      stage_release:
+        description: Upload packages to the matching draft release
         type: boolean
         default: true
 
@@ -55,7 +55,7 @@ jobs:
           CSC_IDENTITY_AUTO_DISCOVERY: 'false'
         run: |
           PKG_VERSION="$(node -p 'require("./package.json").version')"
-          RELEASE_TAG="$(node -p 'require("./package.json").version.replace(/^(\d+\.\d+)\.0(-Alpha.*)$/i, "$1$2")')"
+          RELEASE_TAG="$(node -e 'import("./app/core/app-update-state.mjs").then(({displayAppVersion}) => console.log(displayAppVersion(require("./package.json").version)))')"
           npx --no-install electron-builder --${{ matrix.platform }} --${{ matrix.arch }} --publish never \
             -c.artifactName="AfterShelf-${RELEASE_TAG}-\${os}-\${arch}.\${ext}" \
             -c.nsisWeb.artifactName="AfterShelf-Web-Setup-${RELEASE_TAG}-\${os}-\${arch}.\${ext}" \
@@ -79,8 +79,8 @@ jobs:
             !release/nsis-web/*__uninstaller.exe
 
   prerelease:
-    name: Stage draft alpha release
-    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && inputs.publish_alpha)
+    name: Stage draft release
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.stage_release))
     needs: build
     runs-on: ubuntu-24.04
     permissions:
@@ -98,16 +98,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          RELEASE_TAG="$(node -p 'require("./package.json").version.replace(/^(\d+\.\d+)\.0(-Alpha.*)$/i, "$1$2")')"
+          RELEASE_TAG="$(node -e 'import("./app/core/app-update-state.mjs").then(({displayAppVersion}) => console.log(displayAppVersion(require("./package.json").version)))')"
           if ! gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
-            gh release create "$RELEASE_TAG" --target "${GITHUB_SHA}" --repo "$GITHUB_REPOSITORY" --draft --prerelease --title "$RELEASE_TAG" --notes "It's the initial release."
+            gh release create "$RELEASE_TAG" --target "${GITHUB_SHA}" --repo "$GITHUB_REPOSITORY" --draft --prerelease --title "$RELEASE_TAG" --notes ""
+          elif [[ "$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq '.isDraft')" != true ]]; then
+            echo "Release $RELEASE_TAG is already published."
+            exit 0
           fi
           while IFS= read -r -d '' asset; do
             gh release upload "$RELEASE_TAG" "$asset" --clobber --repo "$GITHUB_REPOSITORY"
           done < <(find release -type f -print0)
-          mapfile -t existing < <(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name')
-          for asset_name in "${existing[@]}"; do
-            if [[ -z "$(find release -type f -name "$asset_name" -print -quit)" ]]; then
-              gh release delete-asset "$RELEASE_TAG" "$asset_name" --yes --repo "$GITHUB_REPOSITORY"
-            fi
-          done

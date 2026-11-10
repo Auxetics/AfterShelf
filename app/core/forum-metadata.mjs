@@ -194,14 +194,14 @@ export class ForumMetadata {
     try { const rows = await this.latestPage(1); return { status: 'reachable', message: `Website reached · update listing parsed${this.lastListingMode === 'rendered' ? ' after page loaded' : ''} (${rows.length} entries on page 1). Use Check for updates to scan newer entries against the saved checkpoint.`, feedStatus: 'ok', entries: rows.length, listingMode: this.lastListingMode }; }
     catch (error) { return { status: 'reachable', message: `Website reached; update listing needs attention. ${error.message}`, feedStatus: 'error' }; }
   }
-  async thread(url, { cover = true, gallery = false } = {}) {
+  async thread(url, { cover = true, gallery = false, downloads = false } = {}) {
     const ref = threadReference(url, this.site.origin), response = await this.response(ref.threadUrl, true, { 'Cache-Control': 'no-cache' });
     let finalRef = ref;
     if (response.url) {
       try { finalRef = threadReference(response.url, this.site.origin); } catch { throw new Error('The forum redirected away from the thread. Open Browse to sign in, then retry.'); }
       if (finalRef.threadId !== ref.threadId) throw new Error('This URL redirects to a different thread. View it in Browse and confirm its correct thread before linking.');
     }
-    const metadata = parseThread((await bytes(response, 3_000_000)).toString('utf8'), finalRef.threadUrl, ref.origin);
+    const metadata = parseThread((await bytes(response, 3_000_000)).toString('utf8'), response.url || finalRef.threadUrl, ref.origin, { downloads });
     if (!cover) {
       delete metadata.coverUrl; delete metadata.coverCandidates;
       if (!gallery) delete metadata.imageGroups;

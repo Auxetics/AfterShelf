@@ -3,7 +3,7 @@ export function displayAppVersion(version) {
   return String(version ?? '')
     .trim()
     .replace(/^v(?=\d)/i, '')
-    .replace(/^(\d+\.\d+)\.0(-alpha.*)$/i, '$1$2');
+    .replace(/^(\d+\.\d+)\.0(-(alpha|beta)(?:[.-].*)?)$/i, '$1$2');
 }
 
 export function restartBlockReason(state, {

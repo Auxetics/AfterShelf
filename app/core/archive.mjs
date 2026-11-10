@@ -42,7 +42,7 @@ export async function extractZip(file, destination, { signal, progress = () => {
           const kind = mode & 0o170000;
           if (kind && ![0o100000, 0o040000].includes(kind)) throw new Error('This archive contains symbolic links or special files. Use an external extractor and select its output.');
           expanded += entry.uncompressedSize;
-          if (expanded > 100 * 1024 ** 3 || ++count > 150000) throw new Error('Archive exceeds the alpha extraction limit. Use an external extraction app.');
+          if (expanded > 100 * 1024 ** 3 || ++count > 150000) throw new Error('Archive exceeds the built-in extraction limit. Use an external extraction app.');
           const target = archivePath(destination, entry.fileName);
           const key = target.toLowerCase();
           if (seen.has(key)) throw new Error('Archive contains duplicate or case-colliding paths. Use an external extraction app.');
