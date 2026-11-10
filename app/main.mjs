@@ -1,6 +1,6 @@
 import { app, BrowserWindow, WebContentsView, session, ipcMain, dialog, shell, clipboard, Menu, nativeImage, net } from 'electron';
 import fs from 'node:fs/promises';
-import { existsSync, accessSync, constants, mkdirSync } from 'node:fs';
+import { existsSync, accessSync, constants, lstatSync, mkdirSync, renameSync } from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -11,7 +11,7 @@ import { newGame, gameKey, ENGINES, ACTIVE_DOWNLOADS, canInstallArchive, offerIn
 import { parseThread } from './core/site.mjs';
 import { safeName, exists, realDirectory, isInside, walk, assertNoLinks } from './core/files.mjs';
 import { savePlan, inspectInstallation, transferSaves } from './core/saves.mjs';
-import { extractZip } from './core/archive.mjs';
+import { extractZip, zipInstallContainer } from './core/archive.mjs';
 import { ForumBrowser } from './browser.mjs';
 import { discoverGames, localGame } from './core/discovery.mjs';
 import { ensureDownloadGame, importArchive, dismissDownloads, applyDownloadSource, assignDownloadGame } from './core/downloads.mjs';
@@ -211,6 +211,19 @@ async function cleanupPartial(id) {
     if (await removePartialDownload(job, { gamesRoot: store.data.settings.gamesRoot, games: store.data.games, downloads: store.data.downloads })) await updateJob(id, { partialRemoved: true, partialCleanupError: '', phase: 'Incomplete file removed. Open the game thread to download again.' });
   } catch (error) { await updateJob(id, { partialCleanupError: error.message }); }
 }
+function placeManagedRelease(root, container, gameRoot, title) {
+  const standaloneApp = container === gameRoot && /\.app$/i.test(container);
+  const extension = standaloneApp ? '.app' : '';
+  const name = safeName(standaloneApp ? path.basename(container, path.extname(container)) : title).replace(/^\.+/, '') || 'Game';
+  const base = /^(?:con|prn|aux|nul|com\d|lpt\d)(?:\.|$)/i.test(name) ? '_' + name : name;
+  let destination = path.join(root, base + extension);
+  for (let n = 2; lstatSync(destination, { throwIfNoEntry: false }); n++) {
+    destination = path.join(root, base + ' (' + n + ')' + extension);
+  }
+  // Keep the collision check and move together across concurrent installs.
+  renameSync(container, destination);
+  return destination;
+}
 async function install(id, mode = 'auto') {
   const job = getJob(id), game = getGame(job.gameId);
   if (job.thread?.threadUrl) {
@@ -228,7 +241,8 @@ async function install(id, mode = 'auto') {
   let original;
   let forumMetadata, metadataWarning = '';
   let installGame = { ...game, ...job.thread };
-  let staging = '', newRoot = '', finalParent = '';
+  const stagingRoot = path.join(root, '.library', 'staging');
+  let staging = '', newRoot = '';
   try {
     original = game.installation && await exists(game.installation.root) ? game.installation : null;
     await updateJob(id, { status: 'installing', error: '', phase: 'Preparing installation' });
@@ -263,21 +277,23 @@ async function install(id, mode = 'auto') {
       if (newRoot === root) throw new Error('Choose the extracted game’s own folder, rather than your entire games directory.');
     } else {
       if (!/\.zip$/i.test(job.path)) throw new Error('Use your external extractor for this format, then select the extracted folder. Patches and installers require manual installation.');
-      await fs.mkdir(path.join(root, '.library', 'staging'), { recursive: true });
-      staging = path.join(root, '.library', 'staging', randomUUID());
+      await assertNoLinks(root, stagingRoot);
+      await fs.mkdir(stagingRoot, { recursive: true });
+      staging = path.join(stagingRoot, randomUUID());
       let last = 0;
       newRoot = await extractZip(job.path, staging, { signal: controller.signal, progress: (count, total) => {
         if (Date.now() - last > 500) { last = Date.now(); void updateJob(id, { phase: `Extracting ${count} of ${total} files` }); }
       }});
     }
     // Keep extracted output resumable if launch selection is cancelled or the app closes.
-    if (!staging && job.stagingPath && isInside(path.join(root, '.library', 'staging'), job.stagingPath) && isInside(job.stagingPath, newRoot, true)) staging = job.stagingPath;
+    if (!staging && job.stagingPath && isInside(stagingRoot, job.stagingPath) && isInside(job.stagingPath, newRoot, true)) staging = job.stagingPath;
     await updateJob(id, { extractedPath: newRoot, stagingPath: staging, phase: 'Confirming extracted game and launch file' });
     controller.signal.throwIfAborted();
     if (original && (isInside(original.root, newRoot, true) || isInside(newRoot, original.root, true))) throw new Error('The new release must be in a separate folder from the original game.');
     const selected = await chooseLaunch(newRoot, installGame.engine, { automatic: mode !== 'folder', title: installGame.title });
     if (!selected) { await updateJob(id, { status: 'awaiting-folder', extractedPath: newRoot, phase: 'Select the extracted folder and launch file to finish' }); return; }
     newRoot = selected.root;
+    if (staging) await assertNoLinks(root, newRoot);
     let transferred = 0;
     if (original) {
       await updateJob(id, { phase: 'Transferring saves and preferences' });
@@ -285,20 +301,17 @@ async function install(id, mode = 'auto') {
       transferred = await transferSaves(plan, original.root, newRoot, controller.signal);
     }
     controller.signal.throwIfAborted();
-    let launch = selected.launch, installedRoot = newRoot, managed = false;
-    if (staging) {
-      finalParent = path.join(root, 'Games', `${game.threadId || safeName(game.id)}-${safeName(game.title)}`, 'versions', `${Date.now()}-${safeName(job.version || 'release')}`);
-      await fs.mkdir(path.dirname(finalParent), { recursive: true });
-      const relativeRoot = path.relative(staging, newRoot), relativeLaunch = path.relative(staging, launch);
-      await fs.rename(staging, finalParent);
-      installedRoot = path.join(finalParent, relativeRoot); launch = path.join(finalParent, relativeLaunch); managed = true;
-      await updateJob(id, { extractedPath: installedRoot, stagingPath: '' });
-    }
-    const manifest = (await walk(managed ? finalParent : installedRoot, { max: 100000, depth: 30 })).filter(item => !item.directory).map(item => item.relative);
+    const managed = Boolean(staging);
+    const container = managed ? await zipInstallContainer(staging, newRoot) : newRoot;
+    const manifest = (await walk(container, { max: 100000, depth: 30 })).filter(item => !item.directory).map(item => item.relative);
     await updateJob(id, { phase: 'Reading installed release and checking forum version' });
-    const localMetadata = await readLocalMetadata(installedRoot, installGame.engine === 'custom' ? selected.info.engine : installGame.engine);
+    const localMetadata = await readLocalMetadata(newRoot, installGame.engine === 'custom' ? selected.info.engine : installGame.engine);
     const versionCheck = checkInstalledVersion(localMetadata, forumMetadata?.latestVersion || '');
-    const installation = { root: installedRoot, container: managed ? finalParent : installedRoot, launch, managed, manifest, at: Date.now(), version: localMetadata.version || job.version || '' };
+    controller.signal.throwIfAborted();
+    const destination = managed ? placeManagedRelease(root, container, newRoot, installGame.title) : container;
+    const installedRoot = path.join(destination, path.relative(container, newRoot));
+    const launch = path.join(destination, path.relative(container, selected.launch));
+    const installation = { root: installedRoot, container: destination, launch, managed, manifest, at: Date.now(), version: localMetadata.version || job.version || '' };
     await store.update(state => {
       applyDownloadSource(state, game.id, job);
       if (forumMetadata) applyForumMetadata(state, game.id, forumMetadata);
@@ -312,6 +325,10 @@ async function install(id, mode = 'auto') {
       const download = state.downloads.find(item => item.id === id);
       Object.assign(download, { status: 'installed', extractedPath: installedRoot, stagingPath: '', phase: `${versionCheck.message} ${transferred} save/preference files transferred.`, metadataWarning, error: '' });
     });
+    if (managed && container !== staging) {
+      try { await assertNoLinks(root, staging); await fs.rm(staging, { recursive: true }); }
+      catch (error) { await store.log('Extraction staging cleanup failed', error.message); }
+    }
     await cleanupArchive(getJob(id));
     await store.log('Installation completed', `Thread ${game.threadId}; engine=${game.engine}; transferred=${transferred}`);
     const retention = game.retention === 'default' ? store.data.settings.retention : game.retention;

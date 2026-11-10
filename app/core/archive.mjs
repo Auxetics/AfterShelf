@@ -3,7 +3,23 @@ import { createWriteStream } from 'node:fs';
 import path from 'node:path';
 import { pipeline } from 'node:stream/promises';
 import yauzl from 'yauzl';
-import { archivePath } from './files.mjs';
+import { archivePath, isInside } from './files.mjs';
+
+async function singlePayloadDirectory(directory) {
+  const entries = (await fs.readdir(directory, { withFileTypes: true })).filter(item => item.name !== '__MACOSX' && item.name !== '.DS_Store');
+  const only = entries[0];
+  return entries.length === 1 && only.isDirectory() ? path.join(directory, only.name) : directory;
+}
+
+export async function zipInstallContainer(staging, gameRoot) {
+  let container = staging;
+  while (container !== gameRoot) {
+    const child = await singlePayloadDirectory(container);
+    if (child === container || !isInside(child, gameRoot, true)) break;
+    container = child;
+  }
+  return container;
+}
 
 export async function extractZip(file, destination, { signal, progress = () => {} } = {}) {
   await fs.mkdir(destination, { recursive: false });
@@ -45,7 +61,5 @@ export async function extractZip(file, destination, { signal, progress = () => {
     });
   } finally { zip.close(); }
   if (!count) throw new Error('The ZIP archive is empty.');
-  const entries = (await fs.readdir(destination, { withFileTypes: true })).filter(item => item.name !== '__MACOSX' && item.name !== '.DS_Store');
-  const only = entries[0];
-  return entries.length === 1 && only.isDirectory() ? path.join(destination, only.name) : destination;
+  return singlePayloadDirectory(destination);
 }

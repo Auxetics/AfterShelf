@@ -3,7 +3,6 @@ name: Build AfterShelf
 on:
   push:
     branches: [main]
-    tags: ['0.*-Alpha', 'v*']
   pull_request:
   workflow_dispatch:
     inputs:
@@ -50,10 +49,6 @@ jobs:
         run: npm ci
       - name: Check source syntax
         run: npm run check
-      - name: Validate release tag
-        if: startsWith(github.ref, 'refs/tags/')
-        shell: bash
-        run: node -e 'const v=require("./package.json").version.replace(/^(\d+\.\d+)\.0(-Alpha.*)$/i,"$1$2"); if(process.env.GITHUB_REF_NAME!==v) throw new Error("Tag must match "+v)'
       - name: Build application packages
         shell: bash
         env:
@@ -85,7 +80,7 @@ jobs:
 
   prerelease:
     name: Stage draft alpha release
-    if: github.ref == 'refs/heads/main' || startsWith(github.ref, 'refs/tags/') || (github.event_name == 'workflow_dispatch' && inputs.publish_alpha)
+    if: github.ref == 'refs/heads/main' || (github.event_name == 'workflow_dispatch' && inputs.publish_alpha)
     needs: build
     runs-on: ubuntu-24.04
     permissions:
