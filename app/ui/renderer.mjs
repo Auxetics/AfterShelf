@@ -69,7 +69,7 @@ function currentGame(id) { return state.games.find(game => game.id === id); }
 function pageActions(actions) { return actions ? `<div class="page-actions">${actions}</div>` : ''; }
 function empty(title, description, name, actions = '') { return `<div class="empty-state"><div class="empty-icon">${icon(name)}</div><h2>${title}</h2><p>${description}</p><div class="empty-actions">${actions}</div></div>`; }
 function status(game) { if(game.availability?.status==='missing')return '<span class="badge">Not installed</span>';if(['offline','unreadable'].includes(game.availability?.status))return '<span class="badge">Files unavailable</span>';const relation=updateSkipped(game)?'skipped':versionRelation(game.installedVersion,game.latestVersion);return relation==='newer'?'<span class="badge update">Update available</span>':relation==='different'?'<span class="badge update">Version differs</span>':game.installation?`<span class="badge installed">${relation==='older'?'Installed version ahead':'Installed'}</span>`:'<span class="badge">Not installed</span>'; }
-function gameImage(game) { const value=game.cover||'';return /^data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(value)?value:''; }
+function gameImage(game) { const value=game.cover||'';return /^data:image\/(?:png|jpeg|webp|gif|avif);base64,[A-Za-z0-9+/=]+$/.test(value)?value:''; }
 function versionLabel(game) { return `${game.installation?(game.availability?.status==='missing'?'Last installed ':'Installed ')+(versionKnown(game.installedVersion)?game.installedVersion:'unknown')+(game.installationCheck?.status==='unverified'?' (unverified)':'')+' · ':''}Forum ${versionKnown(game.latestVersion)?game.latestVersion:game.threadId?'unknown':'not linked'}`; }
 function playDuration(milliseconds) {
   const minutes = Math.floor(milliseconds / 60000);
@@ -77,19 +77,22 @@ function playDuration(milliseconds) {
   const hours = Math.floor(minutes / 60);
   return hours ? hours + ' h ' + minutes % 60 + ' min' : minutes + ' min';
 }
-function transferStatus(job, showBar = false) {
+function transferStatus(job, showBar = false, updating = false) {
   const percent = job.status === 'downloading' ? downloadProgress(job) : null;
-  const label = downloadLabel(job) + (percent == null ? '' : ' · ' + percent + '%');
+  const baseLabel = updating && job.status === 'downloading' && !job.error ? 'Downloading update' : downloadLabel(job);
+  const label = baseLabel + (percent == null ? '' : ' · ' + percent + '%');
+  const group = downloadGroup(job);
+  const badgeClass = group === 'attention' ? 'update' : group === 'active' ? 'active' : '';
   const progress = showBar && job.status === 'downloading'
     ? `<progress class="progress" aria-label="Download progress" max="100" ${percent == null ? '' : 'value="' + percent + '"'}></progress>` : '';
-  return `<div class="transfer-status"><span class="badge ${downloadGroup(job) === 'attention' ? 'update' : ''}">${e(label)}</span>${job.status === 'downloading' && job.speed > 0 ? `<small>${bytes(job.speed)}/s</small>` : ''}${progress}</div>`;
+  return `<div class="transfer-status"><span class="badge ${badgeClass}">${e(label)}</span>${job.status === 'downloading' && job.speed > 0 ? `<small>${bytes(job.speed)}/s</small>` : ''}${progress}</div>`;
 }
 function gameCard(game, jobs = []) {
   const id = e(game.id), title = e(displayGameTitle(game)), initial = e(displayGameTitle(game).replace(/[^\p{L}\p{N}\s]/gu,'').split(/\s+/).slice(0,2).map(x=>x[0]).join('').toUpperCase());
   const playable = canLaunchGame(game);
   const download = jobs.find(canInstallArchive);
   const transfer = currentGameDownload(jobs);
-  const indicator = transfer ? transferStatus(transfer, true) : status(game);
+  const indicator = transfer ? transferStatus(transfer, true, isInstalled(game)) : status(game);
   const finish = download?.status === 'awaiting-folder' || Boolean(download?.extractedPath);
   const action = playable ? 'play' : download && !isInstalled(game) ? 'install-zip' : game.installation ? 'register-game' : download ? 'install-zip' : game.threadUrl ? 'open-game' : 'game-details';
   const quickUpdate = playable && download ? button('install-zip', finish ? 'Resume' : 'Update', 'download', `data-id="${e(download.id)}"`)
@@ -98,7 +101,7 @@ function gameCard(game, jobs = []) {
   const cardAttrs = `data-library-game="${id}"`;
   const image=gameImage(game), art=image?`<img class="cover-image" src="${e(image)}" alt="" loading="lazy" decoding="async" referrerpolicy="no-referrer">`:'';
   if (view === 'list') return `<article class="game-row" ${cardAttrs}><button type="button" class="mini-art" data-action="game-details" data-id="${id}" aria-label="Open details for ${title}">${initial}${art}</button><div class="game-row-info"><h3><button type="button" class="game-title" data-action="game-details" data-id="${id}">${title}</button></h3><p>${sourceBadge(game)} ${e(ENGINE_NAMES[game.engine] || 'Other')} · ${e(versionLabel(game))}</p></div>${indicator}${actions}</article>`;
-  return `<article class="game-card" ${cardAttrs}><button type="button" class="game-art" aria-label="Open details for ${title}" data-action="game-details" data-id="${id}"><span class="monogram">${initial}</span>${art}</button><div class="game-info"><h3><button type="button" class="game-title" data-action="game-details" data-id="${id}">${title}</button></h3><div class="game-meta"><span>${e(ENGINE_NAMES[game.engine])}</span>${sourceBadge(game)}${game.creator?`<span>${e(game.creator)}</span>`:''}</div><p class="version-details">${e(versionLabel(game))}</p>${indicator}<div class="game-actions">${actions}</div></div></article>`;
+  return `<article class="game-card" ${cardAttrs}><button type="button" class="game-art" aria-label="Open details for ${title}" data-action="game-details" data-id="${id}"><span class="monogram">${initial}</span>${art}${indicator}</button><div class="game-info"><h3><button type="button" class="game-title" data-action="game-details" data-id="${id}">${title}</button></h3><div class="game-meta"><span>${e(ENGINE_NAMES[game.engine])}</span>${sourceBadge(game)}${game.creator?`<span>${e(game.creator)}</span>`:''}</div><p class="version-details">${e(versionLabel(game))}</p><div class="game-actions">${actions}</div></div></article>`;
 }
 function compareLibraryGames(a, b) {
   const title = titleOrder.compare(a.title, b.title);
@@ -721,10 +724,12 @@ async function findForumMatch(id) {
     try {
       const rows=await api('find-forum-game',{id,query:automatic ? '' : form.query,sourceId:form.sourceId});
       if(requestNumber!==searchNumber||!$('#modal').open||$('#forum-match-results')!==results)return;
-      results.innerHTML=rows.length?rows.map(row=>`<article class="forum-match"><div><strong>${e(row.title)}</strong><p>${e(row.creator||'Creator unknown')} · ${e(row.latestVersion||'Version unknown')} · Thread ${e(row.threadId)}${row.exact?' · Matching title':''}</p></div><div class="download-actions">${button('link-forum-game','Link this thread','check',`data-id="${e(id)}" data-url="${e(row.threadUrl)}"`,true)}${button('preview-forum-game','View thread','globe',`data-url="${e(row.threadUrl)}"`)}</div></article>`).join(''):`No matching threads found on ${e(configuredSources(state.settings).find(source => source.id === form.sourceId)?.name || 'this source')}. Try a shorter title, switch the website source, or paste the thread URL in game details.`;
+      if(automatic&&rows[0]?.sourceId&&$('#modal select[name="sourceId"]'))$('#modal select[name="sourceId"]').value=rows[0].sourceId;
+      results.innerHTML=rows.length?rows.map(row=>`<article class="forum-match"><div><strong>${e(row.title)}</strong><p>${row.sourceName?`<span class="badge source-badge">${e(row.sourceName)}</span> `:''}${e(row.creator||'Creator unknown')} · ${e(row.latestVersion||'Version unknown')} · Thread ${e(row.threadId)}${row.exact?' · Matching title':''}</p></div><div class="download-actions">${button('link-forum-game','Link this thread','check',`data-id="${e(id)}" data-url="${e(row.threadUrl)}"`,true)}${button('preview-forum-game','View thread','globe',`data-url="${e(row.threadUrl)}"`)}</div></article>`).join(''):`No matching threads found on ${e(configuredSources(state.settings).find(source => source.id === form.sourceId)?.name || 'this source')}. Try a shorter title, switch the website source, or paste the thread URL in game details.`;
     } catch(error) {if(requestNumber===searchNumber&&$('#forum-match-results')===results)results.textContent=error.message;}
   }
   await modal(`<h2>Find a forum match</h2><p>Confirm which thread belongs to ${e(game.title)}. Linking fills its title, creator, current release, description, and available cover while keeping the local installation and version.</p><label class="field"><span>Website source</span><select name="sourceId">${configuredSources(state.settings).map(site=>`<option value="${e(site.id)}" ${site.id===defaultSource.id?'selected':''}>${e(site.name)}</option>`).join('')}</select></label><label class="field"><span>Game title</span><input name="query" required value="${e(game.localMetadata?.title||game.title)}"></label><div class="form-actions"><button type="submit" class="button primary">Search forum</button></div><div id="forum-match-results" class="forum-match-results"></div><div class="form-actions">${button('game-details','Back to game details',null,`data-id="${e(id)}"`)}</div>`,searchMatches);
+  $('#modal select[name="sourceId"]')?.addEventListener('change',()=>{void searchMatches(formData());});
   await searchMatches(formData(), true);
 }
 document.addEventListener('click',event=>{

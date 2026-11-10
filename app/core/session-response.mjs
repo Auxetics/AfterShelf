@@ -1,7 +1,7 @@
 // Electron fetch rejects manual redirects instead of exposing their responses.
 // Use ClientRequest so each hop can be checked synchronously before following,
 // while Chromium retains the session's cookies, proxy and certificate handling.
-export function sessionResponse(createRequest, session, url, { signal, onRedirect, headers, maxBytes = 8_000_000 } = {}) {
+export function sessionResponse(createRequest, session, url, { signal, onRedirect, headers, maxBytes = 15_000_000 } = {}) {
   return new Promise((resolve, reject) => {
     signal?.throwIfAborted();
     let request, settled = false, finalUrl = url, redirects = 0;

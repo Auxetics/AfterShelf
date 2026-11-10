@@ -45,7 +45,11 @@ export async function readRenderedListing({ BrowserWindow, session, url, origin,
             const fingerprint = JSON.stringify(rows.map(row => [row.threadId, row.version, row.title]));
             stable = fingerprint === prior ? stable + 1 : 0; prior = fingerprint;
             if (stable >= 2) return rows;
-          } else if (rows) { empty = true; prior = ''; stable = 0; }
+          } else if (rows) {
+            empty = true;
+            stable = prior === '[]' ? stable + 1 : 0; prior = '[]';
+            if (stable >= 2) return [];
+          }
           await new Promise(resolve => setTimeout(resolve, poll));
         }
       })(),

@@ -18,6 +18,16 @@ export function imageReference(value, base) {
     return url.href;
   } catch { return ''; }
 }
+export function detectImageMime(data) {
+  if (!Buffer.isBuffer(data) && !(data instanceof Uint8Array)) return '';
+  const bytes = Buffer.isBuffer(data) ? data : Buffer.from(data);
+  if (bytes.length >= 8 && bytes[0] === 0x89 && bytes[1] === 0x50 && bytes[2] === 0x4e && bytes[3] === 0x47) return 'image/png';
+  if (bytes.length >= 3 && bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff) return 'image/jpeg';
+  if (bytes.length >= 12 && bytes.subarray(0, 4).toString('latin1') === 'RIFF' && bytes.subarray(8, 12).toString('latin1') === 'WEBP') return 'image/webp';
+  if (bytes.length >= 6 && /^GIF8[79]a$/.test(bytes.subarray(0, 6).toString('latin1'))) return 'image/gif';
+  if (bytes.length >= 12 && bytes.subarray(4, 8).toString('latin1') === 'ftyp' && /^(?:avif|avis|mif1)$/.test(bytes.subarray(8, 12).toString('latin1'))) return 'image/avif';
+  return '';
+}
 function threadImages($, content, url) {
   const groups = new Map();
   const attachment = /\.(?:png|jpe?g|gif|webp|avif)(?:[?#]|$)|\/attachments\//i;
@@ -28,6 +38,7 @@ function threadImages($, content, url) {
   };
   content.find('.bbImageWrapper, .js-lbImage, img, picture source, a[data-fancybox], a[href]').each((_i, element) => {
     const node = $(element);
+    if (node.is('.smilie, .avatar, [data-smilie]') || node.closest('.smilie, .avatar, [data-smilie]').length) return;
     if (node.is('a') && !imageLink(node)) return;
     const anchor = node.closest('a');
     const parent = (imageLink(anchor) && anchor.get(0)) || node.closest('.bbImageWrapper, picture').get(0) || element;
@@ -41,8 +52,9 @@ function threadImages($, content, url) {
   groups.set(null, [$('meta[property="og:image"]').attr('content')]);
   const seen = new Set();
   return [...groups.values()].map(values => [...new Set(values
-    .filter(value => value && !/smilies|avatars|emoji|spacer|placeholder|transparent|loading\.(?:gif|png)|\/logos?\//i.test(value))
+    .filter(value => value && !/smilies|avatars|emoji|joypixels|twemoji|spacer|placeholder|transparent|loading\.(?:gif|png)|\/logos?\//i.test(value))
     .map(value => imageReference(value, url)).filter(Boolean))]
+    .sort((a, b) => Number(/\/\/preview\.f95zone\.to\//i.test(b)) - Number(/\/\/preview\.f95zone\.to\//i.test(a)))
     .filter(value => { if (seen.has(value)) return false; seen.add(value); return true; }).slice(0, 4))
     .filter(values => values.length).slice(0, 40);
 }
@@ -111,18 +123,22 @@ export function parseLatestHtml(html, origin) {
     const link = $(element);
     if (link.closest('nav, header, footer, .message, .message-body, .p-body-sidebar').length) return;
     let ref; try { ref = threadReference(link.attr('href'), origin); } catch { return; }
-    const rawTitle = (link.attr('data-title') || link.text() || link.attr('title') || link.find('img[alt]').first().attr('alt') || '').replace(/\s+/g, ' ').trim();
+    const cleanLink = link.clone();
+    cleanLink.find('.label, .labelLink, .label-append, .badge').remove();
+    const rawTitle = (link.attr('data-title') || cleanLink.text() || link.text() || link.attr('title') || link.find('img[alt]').first().attr('alt') || '').replace(/\s+/g, ' ').trim();
     if (rawTitle.length < 2 || /^(?:\d+|\.{3}|read more|view thread|last post|new posts|unread|first post|go to.*)$/i.test(rawTitle)) return;
     const row = link.closest('.structItem, article, .game-card, .resourceList-item, .contentRow, .block-row, [data-thread-id]');
     const releaseLabel = row.find('.label, .badge').map((_i, label) => $(label).text().trim()).get().find(value => /^(?:v\d[\w.-]*|\d+\.\d[\w.-]*|final|demo)$/i.test(value));
     const version = normalizeVersion(row.attr('data-version') || row.find('[data-version]').first().attr('data-version') || row.find('.game-version, .version').first().text() || versionFromTitle(rawTitle) || releaseLabel);
     const updated = row.find('time[itemprop="dateModified"], time.game-update, time.last-update, time.updated, [itemprop="dateModified"][content]').first();
     const updatedAt = parseTimestamp(row.attr('data-updated-at') || row.attr('data-update-time') || row.find('[data-updated-at]').first().attr('data-updated-at') || row.find('[data-update-time]').first().attr('data-update-time') || updated.attr('data-time') || updated.attr('datetime') || updated.attr('content'));
-    const entry = { threadId: ref.threadId, title: rawTitle, version, engine: detectEngine(row.find('.label, .tagItem').text()), creator: '', timestamp: parseTimestamp(row.find('time[data-time]').first().attr('data-time')), updatedAt, fingerprint: JSON.stringify([version, rawTitle]) };
+    const titleCreator = [...rawTitle.matchAll(/\[([^\]]+)\]/g)].map(match => match[1].trim()).filter(value => !versionFromTitle(`[${value}]`) && detectEngine(value) === 'custom').at(-1) || '';
+    const creator = (titleCreator || row.attr('data-author') || row.find('.username, .game-creator, .creator').first().text().trim() || '').slice(0, 200);
+    const entry = { threadId: ref.threadId, title: rawTitle, version, engine: detectEngine(row.find('.label, .tagItem').text()), creator, timestamp: parseTimestamp(row.find('time[data-time]').first().attr('data-time')), updatedAt, fingerprint: JSON.stringify([version, rawTitle]) };
     const previous = entries.get(ref.threadId);
     if (!previous || !previous.version && entry.version || entry.title.length > previous.title.length && !previous.version) entries.set(ref.threadId, entry);
   });
-  if (!entries.size && !/no (?:games|threads|results|items)|nothing (?:found|to show)/i.test((scope.length ? scope : $('body')).text())) throw new Error('No game thread listing was recognised. Check this source’s latest-updates URL and feed format in Settings.');
+  if (!entries.size && !/\b(?:no|0)\s+(?:matching\s+)?(?:games|threads|results|items|updates|matches|entries)\b|nothing\s+(?:found|to show)|did(?:n['’]t|\s+not)\s+find\s+any/i.test((scope.length ? scope : $('body')).text())) throw new Error('No game thread listing was recognised. Check this source’s latest-updates URL and feed format in Settings.');
   return [...entries.values()];
 }
 export function hostMatches(host, domain) { return host === domain || host.endsWith(`.${domain}`); }

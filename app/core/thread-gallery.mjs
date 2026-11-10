@@ -35,7 +35,7 @@ export class ThreadGallery {
   async #load(file, ref, client, mode) {
     let cache = await this.#read(file);
     const previous = cache;
-    const first = !cache || mode === 'refresh';
+    const first = !cache || mode === 'refresh' || (!cache.photos.length && cache.failed > 0 && mode !== 'more');
     if (first) {
       const metadata = await client.thread(ref.threadUrl, { cover: false, gallery: true });
       cache = { groups: metadata.imageGroups || [], photos: [], cursor: 0, failed: 0 };

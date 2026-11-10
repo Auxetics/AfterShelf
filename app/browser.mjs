@@ -141,7 +141,8 @@ export class ForumBrowser {
   }
   async readListing(url, site) {
     let id;
-    return readRenderedListing({ BrowserWindow: this.BrowserWindow, session: this.session, url, origin: site.origin,
+    const isSearch = new URL(url, site.origin).searchParams.has('search');
+    return readRenderedListing({ BrowserWindow: this.BrowserWindow, session: this.session, url, origin: site.origin, timeout: isSearch ? 6000 : 15000,
       onCreated: contents => { id = contents.id; this.metadataContents.add(id); }, onDisposed: () => this.metadataContents.delete(id) });
   }
   async logout(sourceId = siteId(this.store.data.settings.site)) { const source = sourceById(this.store.data.settings, sourceId); await this.session.clearStorageData({ origin: source.origin, storages: ['cookies', 'localstorage', 'indexdb', 'serviceworkers', 'cachestorage'] }); for (const [id, tab] of [...this.views]) if (tab.sourceId === sourceId) this.close(id); }

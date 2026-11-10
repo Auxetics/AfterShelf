@@ -21,8 +21,9 @@ function matchScore(title, query) {
   if (!candidate || !requested) return 0;
   if (candidate.replaceAll(' ', '') === requested.replaceAll(' ', '')) return 100;
   const words = searchWords(query), titleWords = candidate.split(' ');
-  if (!words.length || !words.every(word => titleWords.some(part => part.startsWith(word)))) return 0;
-  return candidate.includes(words.join(' ')) ? 80 : 60;
+  const compactMatch = words.length > 1 && candidate.replaceAll(' ', '').includes(words.join(''));
+  if (!words.length || (!compactMatch && !words.every(word => titleWords.some(part => part.startsWith(word))))) return 0;
+  return candidate.includes(words.join(' ')) || compactMatch ? 80 : 60;
 }
 export function searchUrl(site, title, page = 1) {
   return titleSearchUrl(site, fitSearchWords(searchWords(title)), page);
@@ -80,7 +81,7 @@ export class ForumMetadata {
     this.lastListingMode = 'server';
     try { rows = parseLatestHtml(html, this.site.origin); }
     catch (error) { if (!this.renderListing || !/No game thread listing/.test(error.message)) throw error; }
-    if (rows?.length || !this.renderListing) return rows;
+    if (Array.isArray(rows) || !this.renderListing) return rows;
     await this.listingProgress?.('Website reached; waiting for the game listing to load…');
     rows = await this.renderListing(url, this.site);
     if (!Array.isArray(rows)) throw new Error('The rendered listing returned no recognised game data.');
@@ -106,12 +107,7 @@ export class ForumMetadata {
     const queryWords = query.split(' ');
     const alternate = queryWords.reduce((longest, word) => word.length > longest.length ? word : longest, '');
     const found = new Map();
-    const searchPage = async (phrase, page, seen) => {
-      const url = titleSearchUrl(this.site, phrase, page), response = await this.response(url);
-      const body = (await bytes(response, 5_000_000)).toString('utf8');
-      let rows;
-      if (this.site.feedFormat === 'html') rows = await this.htmlRows(body, url);
-      else { let payload; try { payload = JSON.parse(body); } catch { throw new Error('Search returned a page instead of game data. Sign in through Browse, then retry.'); } rows = parseLatest(payload); }
+    const collect = (rows, seen) => {
       let newRows = 0;
       for (const row of rows) {
         if (seen.has(row.threadId)) continue;
@@ -123,12 +119,47 @@ export class ForumMetadata {
       }
       return { total: rows.length, newRows };
     };
+    const searchPage = async (phrase, page, seen) => {
+      const url = titleSearchUrl(this.site, phrase, page), response = await this.response(url);
+      const body = (await bytes(response, 5_000_000)).toString('utf8');
+      let rows;
+      if (this.site.feedFormat === 'html') {
+        try { rows = await this.htmlRows(body, url); }
+        catch (error) {
+          if (!/No game thread listing|no supported game listing/i.test(error.message)) throw error;
+          rows = [];
+        }
+      } else {
+        let payload;
+        try { payload = JSON.parse(body); } catch { throw new Error('Search returned a page instead of game data. Sign in through Browse, then retry.'); }
+        rows = parseLatest(payload);
+      }
+      return collect(rows, seen);
+    };
+    const searchForum = async phrase => {
+      const url = new URL('/search/search', this.site.origin);
+      url.searchParams.set('keywords', phrase);
+      url.searchParams.set('c[title_only]', '1');
+      try {
+        const response = await this.response(url.href);
+        const body = (await bytes(response, 5_000_000)).toString('utf8');
+        collect(parseLatestHtml(body, this.site.origin), new Set());
+      } catch {}
+    };
     const seen = new Set();
     let repeatedPage = false;
-    for (let page = 1; page <= 3; page++) {
-      const { total, newRows } = await searchPage(query, page, seen);
+    const maxPages = this.site.feedFormat === 'html' ? 1 : 3;
+    for (let page = 1; page <= maxPages; page++) {
+      let result;
+      try { result = await searchPage(query, page, seen); }
+      catch (error) { if (page > 1 && found.size) break; throw error; }
+      const { total, newRows } = result;
       repeatedPage = total > 0 && !newRows;
       if (total < 30 || repeatedPage) break;
+    }
+    if (this.site.feedFormat === 'html' && !found.size) {
+      await searchForum(query);
+      if (!found.size && alternate !== query) await searchForum(alternate);
     }
     // The endpoint can require a literal phrase. Try one distinctive word, but
     // score its results against the full title to keep unrelated rows out.
@@ -179,12 +210,12 @@ export class ForumMetadata {
     return this.withCover(metadata);
   }
   async photo(url, gallery = false) {
-    const image = await this.response(url, false, { Accept: 'image/avif,image/webp,image/png,image/jpeg,image/gif,*/*;q=0.5', Referer: this.site.origin + '/' });
+    const image = await this.response(url, false, { Accept: 'image/png,image/jpeg,image/webp,image/gif,image/avif;q=0.8,*/*;q=0.5', Referer: this.site.origin + '/' });
     if (!/^image\/(?:png|jpe?g|webp|gif|avif)(?:;|$)/i.test(image.headers.get('content-type') || '')) {
       await image.body?.cancel();
       throw new Error('The cover response was not a supported image.');
     }
-    const data = await bytes(image, 8_000_000);
+    const data = await bytes(image, 15_000_000);
     const src = this.decodeCover(data, { gallery });
     if (!src) throw new Error('The cover image could not be decoded.');
     return { id: createHash('sha256').update(data).digest('hex'), src };

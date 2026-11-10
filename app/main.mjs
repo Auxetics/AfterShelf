@@ -8,7 +8,7 @@ import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { Store } from './core/store.mjs';
 import { newGame, gameKey, ENGINES, ACTIVE_DOWNLOADS, canInstallArchive, offerInstallation, canLaunchGame, normalizedTitle, PLAY_STATUSES, hasUpdate, updateSkipped } from './core/model.mjs';
-import { parseThread } from './core/site.mjs';
+import { parseThread, detectImageMime } from './core/site.mjs';
 import { safeName, exists, realDirectory, isInside, walk, assertNoLinks } from './core/files.mjs';
 import { savePlan, inspectInstallation, transferSaves } from './core/saves.mjs';
 import { extractZip, zipInstallContainer, zipExpandedSize } from './core/archive.mjs';
@@ -26,7 +26,7 @@ import { ForumMetadata } from './core/forum-metadata.mjs';
 import { sessionResponse } from './core/session-response.mjs';
 import { checkAllSourceUpdates } from './core/update-checker.mjs';
 import { APP_NAME, profileDirectory, syncDockBadge } from './core/desktop.mjs';
-import { sourceById, sourceForUrl, sourceThreadReference, sourceId, updateSourceSettings, checkSourceStatus, sameThread, gameMatchesThread, gameSearchSource } from './core/sources.mjs';
+import { configuredSources, sourceById, sourceForUrl, sourceThreadReference, sourceId, updateSourceSettings, checkSourceStatus, sameThread, gameMatchesThread, gameSearchSource } from './core/sources.mjs';
 import { AppUpdater, restartBlockReason } from './core/app-updater.mjs';
 import { listGameSaves, readRenpySlot, readRpgSave, editRpgSave, labelRpgFields } from './core/save-tools.mjs';
 import { installationFolder, measureStorage, storageByDrive } from './core/game-storage.mjs';
@@ -120,17 +120,21 @@ function metadataClient(source = store.data.settings.site) {
     const request = metadataRequests.then(async () => {
       const delay = nextMetadataRequest - Date.now();
       if (delay > 0) await new Promise(resolve => setTimeout(resolve, delay));
-      nextMetadataRequest = Date.now() + 1000;
+      nextMetadataRequest = Date.now() + (options?.headers?.Accept?.startsWith('image/') ? 200 : 1000);
       return sessionResponse(requestOptions => net.request(requestOptions), browser.session, url, options);
     });
     metadataRequests = request.then(() => {}, () => {});
     return request;
   }, (data, { gallery = false } = {}) => {
     const image = nativeImage.createFromBuffer(data);
-    if (image.isEmpty()) throw new Error('The cover image could not be decoded.');
-    const size = image.getSize(), scale = Math.min(1, (gallery ? 1280 : 640) / size.width, (gallery ? 850 : 400) / size.height);
-    const resized = image.resize({ width: Math.max(1, Math.round(size.width * scale)), height: Math.max(1, Math.round(size.height * scale)) });
-    return gallery ? 'data:image/jpeg;base64,' + resized.toJPEG(82).toString('base64') : resized.toDataURL();
+    if (!image.isEmpty()) {
+      const size = image.getSize(), scale = Math.min(1, (gallery ? 1280 : 640) / size.width, (gallery ? 850 : 400) / size.height);
+      const resized = image.resize({ width: Math.max(1, Math.round(size.width * scale)), height: Math.max(1, Math.round(size.height * scale)) });
+      return gallery ? 'data:image/jpeg;base64,' + resized.toJPEG(82).toString('base64') : resized.toDataURL();
+    }
+    const mime = detectImageMime(data);
+    if (!mime) throw new Error('The cover image could not be decoded.');
+    return `data:${mime};base64,${Buffer.from(data).toString('base64')}`;
   }, { renderListing: (url, source) => browser.readListing(url, source) });
 }
 async function refreshLocalDetails(id) {
@@ -720,12 +724,31 @@ const actions = {
     if (!query) await refreshLocalDetails(input.id);
     const game = getGame(input.id);
     const settings = store.data.settings;
-    const source = input.sourceId ? sourceById(settings, input.sourceId) : gameSearchSource(settings, game);
-    const client = metadataClient(source);
-    if (query) return client.search(query);
-    const title = game.localMetadata?.title || game.title;
-    const matches = await client.search(title);
-    return matches.length || title === game.title ? matches : client.search(game.title);
+    const primary = input.sourceId ? sourceById(settings, input.sourceId) : gameSearchSource(settings, game);
+    const searchSource = async source => {
+      const client = metadataClient(source);
+      const tag = rows => rows.map(row => ({ ...row, sourceId: source.id, sourceName: source.shortName }));
+      if (query) return tag(await client.search(query));
+      const title = game.localMetadata?.title || game.title;
+      const matches = await client.search(title);
+      return tag(matches.length || title === game.title ? matches : await client.search(game.title));
+    };
+    let primaryError;
+    try {
+      const matches = await searchSource(primary);
+      if (matches.length) return matches;
+    } catch (error) {
+      primaryError = error;
+    }
+    for (const other of configuredSources(settings)) {
+      if (other.id === primary.id || !other.latestPath) continue;
+      try {
+        const matches = await searchSource(other);
+        if (matches.length) return matches;
+      } catch {}
+    }
+    if (primaryError) throw primaryError;
+    return [];
   },
   'link-forum-game': async input => {
     getGame(input.id);
