@@ -29,6 +29,15 @@ const icons = {
 const icon = name => `<svg viewBox="0 0 24 24" aria-hidden="true">${icons[name] || icons.info}</svg>`;
 const e = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[char]);
 const $ = selector => document.querySelector(selector);
+const libraryStatuses = [['all', 'All games'], ['updates', 'Pending updates'], ['installed', 'Installed'], ['uninstalled', 'Not installed']];
+const librarySources = [['all', 'All sources'], ['LC', 'LC only'], ['F95', 'F95 only'], ['Local', 'Local only']];
+const librarySorts = [
+  ['added-desc', 'Newest added'], ['added-asc', 'Oldest added'],
+  ['title-asc', 'Title A–Z'], ['title-desc', 'Title Z–A'], ['installed-desc', 'Recently installed']
+];
+const titleOrder = new Intl.Collator(undefined, { numeric: true, sensitivity: 'base' });
+let sourceFilter = 'all', librarySort = localStorage.getItem('library-sort');
+if (!librarySorts.some(([id]) => id === librarySort)) librarySort = 'added-desc';
 let state, runtime, browserState = { activeId: null, tabs: [] }, page = 'library', filter = 'all', search = '', view = localStorage.getItem('view') || 'grid', modalSubmit, toastTimer;
 let setup;
 const content = $('#content');
@@ -47,7 +56,6 @@ function bytes(value) { if (!value) return '0 B'; const units = ['B','KB','MB','
 function currentGame(id) { return state.games.find(game => game.id === id); }
 function pageActions(actions) { return actions ? `<div class="page-actions">${actions}</div>` : ''; }
 function empty(title, description, name, actions = '') { return `<div class="empty-state"><div class="empty-icon">${icon(name)}</div><h2>${title}</h2><p>${description}</p><div class="empty-actions">${actions}</div></div>`; }
-function counts() { return { all: state.games.length, installed: state.games.filter(isInstalled).length, ready: state.games.filter(canLaunchGame).length, updates: state.games.filter(game => isInstalled(game) && hasUpdate(game)).length, uninstalled: state.games.filter(game => !isInstalled(game)).length }; }
 function status(game) { if(game.availability?.status==='missing')return '<span class="badge">Not installed</span>';if(['offline','unreadable'].includes(game.availability?.status))return '<span class="badge">Files unavailable</span>';const relation=versionRelation(game.installedVersion,game.latestVersion);return relation==='newer'?'<span class="badge update">Update available</span>':relation==='different'?'<span class="badge update">Version differs</span>':game.installation?`<span class="badge installed">${relation==='older'?'Installed version ahead':'Installed'}</span>`:'<span class="badge">Not installed</span>'; }
 function gameImage(game) { const value=game.cover||'';return /^data:image\/(?:png|jpeg|webp|gif);base64,[A-Za-z0-9+/=]+$/.test(value)?value:''; }
 function versionLabel(game) { return `${game.installation?(game.availability?.status==='missing'?'Last installed ':'Installed ')+(versionKnown(game.installedVersion)?game.installedVersion:'unknown')+(game.installationCheck?.status==='unverified'?' (unverified)':'')+' · ':''}Forum ${versionKnown(game.latestVersion)?game.latestVersion:game.threadId?'unknown':'not linked'}`; }
@@ -62,15 +70,63 @@ function gameCard(game) {
   if (view === 'list') return `<article class="game-row"><div class="mini-art">${initial}${art}</div><div class="game-row-info"><h3 data-action="open-game" data-id="${id}">${title}</h3><p>${sourceBadge(game)} ${e(ENGINE_NAMES[game.engine] || 'Other')} · ${e(versionLabel(game))}</p></div>${status(game)}${actions}</article>`;
   return `<article class="game-card"><div class="game-art" data-action="open-game" data-id="${id}">${status(game)}<span class="monogram">${initial}</span>${art}</div><div class="game-info"><h3 data-action="open-game" data-id="${id}">${title}</h3><div class="game-meta"><span>${e(ENGINE_NAMES[game.engine])}</span>${sourceBadge(game)}${game.creator?`<span>${e(game.creator)}</span>`:''}</div><p class="version-details">${e(versionLabel(game))}</p><div class="game-actions">${actions}</div></div></article>`;
 }
+function compareLibraryGames(a, b) {
+  const title = titleOrder.compare(a.title, b.title);
+  if (librarySort === 'title-asc') return title;
+  if (librarySort === 'title-desc') return -title;
+  const date = game => librarySort === 'installed-desc' ? (isInstalled(game) ? game.installation.at : 0) : game.addedAt;
+  const first = date(a), second = date(b);
+  if (!first || !second) return Number(Boolean(second)) - Number(Boolean(first)) || title;
+  return (librarySort === 'added-asc' ? first - second : second - first) || title;
+}
+function renderLibraryResults() {
+  const query = search.trim().toLowerCase();
+  const visible = state.games.filter(game => {
+    const installed = isInstalled(game);
+    if (filter === 'updates' && !(installed && hasUpdate(game))) return false;
+    if ((filter === 'installed' && !installed) || (filter === 'uninstalled' && installed)) return false;
+    if (sourceFilter !== 'all' && sourceLabel(state.settings, game) !== sourceFilter) return false;
+    return !query || `${game.title} ${ENGINE_NAMES[game.engine]}`.toLowerCase().includes(query);
+  }).sort(compareLibraryGames);
+  for (const control of content.querySelectorAll('[data-filter], [data-view]')) {
+    control.setAttribute('aria-pressed', control.dataset.filter === filter || control.dataset.view === view);
+  }
+  const count = $('#library-result-count');
+  const label = `${visible.length} ${visible.length === 1 ? 'game' : 'games'}`;
+  if (count.textContent !== label) count.textContent = label;
+  $('#library-results').innerHTML = visible.length ? `<div class="game-${view}">${visible.map(gameCard).join('')}</div>`
+    : state.games.length ? empty('No matching games', 'Try a different search or filter.', 'search', button('reset-filter', 'Clear filters', null))
+    : empty('Your next favourite is out there.', 'Sign in to F95 or LewdCorner, browse a game thread, and add it to your library. Your collection stays on this device.', 'library', button('browse', 'Browse games', 'globe', '', true) + button('add-thread', 'Add a thread URL', 'plus'));
+}
 function renderLibrary() {
-  const c = counts();
-  const visible = state.games.filter(game => (filter === 'all' || filter === 'installed' && isInstalled(game) || filter === 'updates' && isInstalled(game) && hasUpdate(game) || filter === 'uninstalled' && !isInstalled(game)) && `${game.title} ${ENGINE_NAMES[game.engine]}`.toLowerCase().includes(search.toLowerCase()));
-  content.innerHTML = pageActions(sourceShortcuts()+button('scan-folder','Scan games folder','folder') + button('refresh-library-details',state.detailScan?.active?state.detailScan.message:'Refresh library details','refresh',state.detailScan?.active?'disabled':'') + button('check-updates','Check for updates','refresh',state.scan.active?'disabled':'') + button('check-all-updates','Check all linked threads','search',state.scan.active?'disabled':'title="Optional full verification of every linked game"') + button('add-thread','Add game','plus','',true)) +
-    `<div class="stats">${[['library',c.all,'Games in library'],['play',c.ready,'Ready to play'],['refresh',c.updates,'Updates / differences'],['download',state.downloads.filter(job=>job.status==='downloaded'||job.status==='awaiting-folder').length,'Ready to install']].map(([name,number,label])=>`<div class="stat"><span class="stat-icon">${icon(name)}</span><div><strong>${number}</strong><small>${label}</small></div></div>`).join('')}</div>` +
-    `<div class="toolbar"><div class="filters">${[['all','All games'],['installed','Installed'],['updates','Updates'],['uninstalled','Not installed']].map(([id,label])=>`<button class="filter ${filter===id?'active':''}" data-filter="${id}">${label}<span>${c[id]}</span></button>`).join('')}</div><div class="search-tools"><label class="search">${icon('search')}<input id="game-search" placeholder="Search your library…" value="${e(search)}" aria-label="Search library"></label><div class="view-toggle"><button class="icon-button ${view==='grid'?'active':''}" data-view="grid" aria-label="Grid view">${icon('library')}</button><button class="icon-button ${view==='list'?'active':''}" data-view="list" aria-label="List view">${icon('list')}</button></div></div></div>`+
-    `<div class="section-label"><span>${filter==='updates'?'Awaiting your next visit':'YOUR COLLECTION'}</span><span>${visible.length} ${visible.length===1?'game':'games'}</span></div>`+
-    (visible.length ? `<div class="game-${view}">${visible.map(gameCard).join('')}</div>` : state.games.length ? empty('No matching games','Try a different search or filter.','search',button('reset-filter','Clear filters',null)) : empty('Your next favourite is out there.', 'Sign in to F95 or LewdCorner, browse a game thread, and add it to your library. Your collection stays on this device.', 'library', button('browse','Browse games','globe','',true)+button('add-thread','Add a thread URL','plus'))) +
-    (!state.settings.setupCompleted ? `<div class="onboarding">${icon('folder')}<div><strong>Finish setting up your library.</strong><p>Choose a games folder, download behaviour, and optionally find your existing games.</p></div>${button('setup','Set up library','arrow')}</div>` : '');
+  if (!$('#library-results')) {
+    const options = (choices, current) => choices.map(([id, label]) => `<option value="${id}" ${id === current ? "selected" : ""}>${label}</option>`).join('');
+    content.innerHTML = `<div id="library-actions"></div>
+      <div class="toolbar">
+        <div class="filters" role="group" aria-label="Game status">
+          ${libraryStatuses.map(([id, label]) => `<button type="button" class="filter" data-filter="${id}">${label}</button>`).join("")}
+        </div>
+        <div class="search-tools">
+          <select id="library-source" aria-label="Filter by source">${options(librarySources, sourceFilter)}</select>
+          <select id="library-sort" aria-label="Sort games">${options(librarySorts, librarySort)}</select>
+          <label class="search">${icon("search")}<input type="search" id="game-search" placeholder="Search library…" value="${e(search)}" aria-label="Search library"></label>
+          <div class="view-toggle" role="group" aria-label="Library view">
+            <button type="button" class="icon-button" data-view="grid" aria-label="Grid view">${icon("library")}</button>
+            <button type="button" class="icon-button" data-view="list" aria-label="List view">${icon("list")}</button>
+          </div>
+        </div>
+      </div>
+      <div class="section-label"><span>YOUR COLLECTION</span><span id="library-result-count" role="status"></span></div>
+      <div id="library-results"></div><div id="library-onboarding"></div>`;
+  }
+  $('#library-actions').innerHTML = pageActions(sourceShortcuts() +
+    button('scan-folder', 'Scan games folder', 'folder') +
+    button('refresh-library-details', state.detailScan?.active ? state.detailScan.message : 'Refresh library details', 'refresh', state.detailScan?.active ? 'disabled' : '') +
+    button('check-updates', 'Check for updates', 'refresh', state.scan.active ? 'disabled' : '') +
+    button('check-all-updates', 'Check all linked threads', 'search', state.scan.active ? 'disabled' : 'title="Optional full verification of every linked game"') +
+    button('add-thread', 'Add game', 'plus', '', true));
+  $('#library-onboarding').innerHTML = state.settings.setupCompleted ? '' : `<div class="onboarding">${icon('folder')}<div><strong>Finish setting up your library.</strong><p>Choose a games folder, download behaviour, and optionally find your existing games.</p></div>${button('setup', 'Set up library', 'arrow')}</div>`;
+  renderLibraryResults();
 }
 function renderBrowse() {
   content.innerHTML = `<div class="browser-shell"><div class="browser-tabbar"><div id="browser-tabs" class="browser-tabs" role="tablist" aria-label="Browser tabs"></div><button type="button" class="icon-button new-tab" data-action="browser-new-tab" aria-label="New tab" title="New tab">${icon('plus')}</button></div><div class="browser-toolbar"><button type="button" class="icon-button" data-action="browser-back" aria-label="Back" title="Back">${icon('back')}</button><button type="button" class="icon-button" data-action="browser-forward" aria-label="Forward" title="Forward">${icon('forward')}</button><button type="button" class="icon-button" data-action="browser-reload" aria-label="Reload" title="Reload">${icon('refresh')}</button><button type="button" class="icon-button" data-action="browser-home" aria-label="Forum home" title="Forum home">${icon('globe')}</button><span class="browser-toolbar-spacer"></span><button type="button" class="app-update-chip" data-app-update-chip data-action="apply-app-update" hidden></button>${sourceShortcuts()}${button('add-current','Add this thread','plus','',true)}</div><div id="browser-error" class="browser-error" role="status" hidden></div><div id="browser-slot" class="browser-slot"></div></div>`;
@@ -294,8 +350,8 @@ async function findForumMatch(id) {
 }
 document.addEventListener('click',event=>{
   const nav = event.target.closest('[data-nav]'); if(nav){void navigate(nav.dataset.nav);return;}
-  const f = event.target.closest('[data-filter]');if(f){filter=f.dataset.filter;renderLibrary();return;}
-  const v=event.target.closest('[data-view]');if(v){view=v.dataset.view;localStorage.setItem('view',view);renderLibrary();return;}
+  const f = event.target.closest('[data-filter]');if(f){filter=f.dataset.filter;renderLibraryResults();return;}
+  const v=event.target.closest('[data-view]');if(v){view=v.dataset.view;localStorage.setItem('view',view);renderLibraryResults();return;}
   const tabClose=event.target.closest('[data-close-tab]');if(tabClose){void api('browser-close-tab',Number(tabClose.dataset.closeTab));return;}
   const tab=event.target.closest('[data-tab]');if(tab){void api('browser-tab',Number(tab.dataset.tab));return;}
   const target=event.target.closest('[data-action]');if(!target)return;
@@ -321,7 +377,11 @@ document.addEventListener('click',event=>{
     if(action==='refresh-library-details'){const result=await api(action);toast(result.errors.length?`${result.refreshed} games refreshed. ${result.errors[0]}`:`${result.refreshed} games refreshed${result.unmatched?`; ${result.unmatched} need a forum match`:''}${result.coverWarnings?`; ${result.coverWarnings} covers need attention in game details`:''}.`,Boolean(result.errors.length||result.coverWarnings));return;}
     if(action==='clear-completed-downloads'){const count=await api(action);toast(`${count} completed records removed. Files stay on disk.`);return;}
     if(action==='clear-download'){await api(action,id);toast('Removed from list. Files stay on disk.');return;}
-    if(action==='reset-filter'){filter='all';search='';renderLibrary();return;}
+    if(action==='reset-filter'){
+      filter='all';sourceFilter='all';search='';
+      $('#library-source').value=sourceFilter;$('#game-search').value=search;
+      renderLibraryResults();$('[data-filter="all"]').focus();return;
+    }
     if(action==='open-source'){await navigate('browse');await api('browser-open-source',target.dataset.source);return;}
     if(action==='check-source'){const result=await api('check-source-status',target.dataset.source);toast(result.message,result.status==='error'||result.feedStatus==='error');return;}
     if(action==='logout-source'){await api('browser-logout',target.dataset.source);toast('This source’s login cleared.');return;}
@@ -355,9 +415,11 @@ document.addEventListener('click',event=>{
 document.addEventListener('input',event=>{
   if(event.target.id==='download-game-choice') { const creating=event.target.value==='__new__';$('#download-new-game').hidden=!creating;$('#download-new-title').required=creating;return; }
   if(event.target.dataset.candidate&&setup){if(event.target.checked)setup.selected.add(event.target.dataset.candidate);else setup.selected.delete(event.target.dataset.candidate);const status=$('#setup-scan-status');if(status)status.textContent=`${setup.candidates.length} items found · ${setup.selected.size} selected`;if(setup.importOnly)$('#modal-form [type=submit]').textContent=setup.selected.size?'Add selected games':'Done';return;}
-  if(event.target.id==='game-search'){
-    const cursor=event.target.selectionStart;search=event.target.value;renderLibrary();$('#game-search').focus();$('#game-search').setSelectionRange(cursor,cursor);
-  }
+  if(event.target.id==='game-search'){search=event.target.value;renderLibraryResults();}
+});
+document.addEventListener('change',event=>{
+  if(event.target.id==='library-source'){sourceFilter=event.target.value;renderLibraryResults();}
+  if(event.target.id==='library-sort'){librarySort=event.target.value;localStorage.setItem('library-sort',librarySort);renderLibraryResults();}
 });
 document.addEventListener('submit',event=>{
   event.preventDefault();
