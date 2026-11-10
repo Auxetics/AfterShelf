@@ -1,5 +1,5 @@
 import path from 'node:path';
-import { versionRelation, isInstalled } from './model.mjs';
+import { versionRelation, isInstalled, updateSkipped } from './model.mjs';
 
 export const APP_NAME = 'AfterShelf';
 
@@ -13,7 +13,7 @@ export function profileDirectory(appData, exists, env = process.env) {
 }
 
 export function availableUpdateCount(games) {
-  return games.filter(game => isInstalled(game) && game.threadId && game.threadUrl && versionRelation(game.installedVersion, game.latestVersion) === 'newer').length;
+  return games.filter(game => isInstalled(game) && game.threadId && game.threadUrl && !updateSkipped(game) && versionRelation(game.installedVersion, game.latestVersion) === 'newer').length;
 }
 
 export function syncDockBadge(app, games, platform = process.platform) {

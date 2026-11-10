@@ -1,4 +1,4 @@
-import { app, BrowserWindow, WebContentsView, session, ipcMain, dialog, shell, clipboard, Menu, nativeImage, net } from 'electron';
+import { app, BrowserWindow, WebContentsView, session, ipcMain, dialog, shell, clipboard, Menu, nativeImage, net, Notification } from 'electron';
 import fs from 'node:fs/promises';
 import { existsSync, accessSync, constants, lstatSync, mkdirSync, renameSync } from 'node:fs';
 import path from 'node:path';
@@ -7,11 +7,11 @@ import { fileURLToPath } from 'node:url';
 import { randomUUID } from 'node:crypto';
 import { spawn } from 'node:child_process';
 import { Store } from './core/store.mjs';
-import { newGame, gameKey, ENGINES, ACTIVE_DOWNLOADS, canInstallArchive, offerInstallation, canLaunchGame, normalizedTitle } from './core/model.mjs';
+import { newGame, gameKey, ENGINES, ACTIVE_DOWNLOADS, canInstallArchive, offerInstallation, canLaunchGame, normalizedTitle, PLAY_STATUSES, hasUpdate, updateSkipped } from './core/model.mjs';
 import { parseThread } from './core/site.mjs';
 import { safeName, exists, realDirectory, isInside, walk, assertNoLinks } from './core/files.mjs';
 import { savePlan, inspectInstallation, transferSaves } from './core/saves.mjs';
-import { extractZip, zipInstallContainer } from './core/archive.mjs';
+import { extractZip, zipInstallContainer, zipExpandedSize } from './core/archive.mjs';
 import { ForumBrowser } from './browser.mjs';
 import { discoverGames, localGame } from './core/discovery.mjs';
 import { ensureDownloadGame, importArchive, dismissDownloads, applyDownloadSource, assignDownloadGame } from './core/downloads.mjs';
@@ -26,12 +26,23 @@ import { ForumMetadata } from './core/forum-metadata.mjs';
 import { sessionResponse } from './core/session-response.mjs';
 import { checkAllSourceUpdates } from './core/update-checker.mjs';
 import { APP_NAME, profileDirectory, syncDockBadge } from './core/desktop.mjs';
-import { sourceById, sourceForUrl, sourceThreadReference, sourceId, updateSourceSettings, checkSourceStatus } from './core/sources.mjs';
+import { sourceById, sourceForUrl, sourceThreadReference, sourceId, updateSourceSettings, checkSourceStatus, sameThread, gameMatchesThread, gameSearchSource } from './core/sources.mjs';
 import { AppUpdater, restartBlockReason } from './core/app-updater.mjs';
+import { listGameSaves, readRenpySlot, readRpgSave, editRpgSave, labelRpgFields } from './core/save-tools.mjs';
+import { installationFolder, measureStorage, storageByDrive } from './core/game-storage.mjs';
+import { gamesFolders, gamesFolderFor, containingGamesFolder } from './core/game-folders.mjs';
+import { registerHtmlScheme, htmlGameOpen, launchHtmlGame, closeHtmlGames } from './core/html-games.mjs';
+
+import { recordForumRelease, recordHtmlSession } from './core/release-history.mjs';
+import { isArchiveName } from './core/archive-names.mjs';
+import { ThreadGallery } from './core/thread-gallery.mjs';
+
+registerHtmlScheme();
 
 const directory = path.dirname(fileURLToPath(import.meta.url));
 const uiFile = path.join(directory, 'ui', 'index.html');
 const profile = profileDirectory(app.getPath('appData'), existsSync);
+const threadGallery = new ThreadGallery(path.join(profile, 'thread-photos'));
 mkdirSync(profile, { recursive: true });
 app.setName(APP_NAME);
 app.setPath('userData', profile);
@@ -40,6 +51,7 @@ app.enableSandbox();
 let window, store, browser, appUpdater, quitConfirmed = false, interval, closingForFlush = false;
 let libraryScanController;
 const activeItems = new Map(), operations = new Map();
+const watchNotifications = new Set();
 const detailOperations = new Set();
 let metadataRequests = Promise.resolve(), nextMetadataRequest = 0;
 const currentRuntime = () => ({
@@ -58,23 +70,47 @@ const getJob = id => { const job = store.data.downloads.find(job => job.id === i
 const updateJob = (id, changes) => store.update(state => { const job = state.downloads.find(item => item.id === id); if (job) Object.assign(job, changes); });
 const activeWork = () => activeItems.size > 0 || operations.size > 0;
 const text = value => typeof value === 'string' ? value.trim() : '';
+function deletionOptions(roots, signal) {
+  return {
+    collectionRoot: store.data.settings.gamesRoot,
+    protectedRoots: [...gamesFolders(store.data.settings), ...(store.data.ignoredGameRoots || []).filter(root => !roots.includes(root)), ...['home', 'desktop', 'documents', 'downloads', 'appData'].map(name => app.getPath(name))],
+    protectedTrees: [app.getPath('userData'), app.getAppPath(), app.getPath('exe')],
+    signal
+  };
+}
+async function gameSave(id, file) {
+  const inventory = await listGameSaves(getGame(id));
+  const save = inventory.files.find(item => item.file === file);
+  if (!save) throw new Error('This save is no longer available. Refresh the Saves panel.');
+  return save;
+}
+function retainedVersion(game, root) {
+  const version = game.previous.find(item => item.root === root);
+  if (!version) throw new Error('This version is no longer in the library.');
+  return version;
+}
 async function chooseFolder(title, defaultPath) {
   const result = await dialog.showOpenDialog(window, { title, defaultPath: defaultPath || store.data.settings.gamesRoot || app.getPath('home'), properties: ['openDirectory', 'createDirectory', 'treatPackageAsDirectory'] });
   return result.canceled ? null : realDirectory(result.filePaths[0]);
 }
-async function requireRoot() {
-  const root = store.data.settings.gamesRoot;
+async function requireRoot(root = store.data.settings.gamesRoot) {
   if (!root) throw new Error('Choose your games folder in Settings first.');
-  const resolved = await realDirectory(root); await fs.access(resolved, fs.constants.W_OK);
-  return resolved;
+  try { const resolved = await realDirectory(root); await fs.access(resolved, constants.W_OK); return resolved; }
+  catch { throw new Error('Games folder is offline or not writable: ' + root); }
 }
 async function addMeta(meta) {
-  meta = await metadataClient(meta.origin).withCover(meta);
-  const id = store.data.games.find(game => game.origin === meta.origin && game.threadId === meta.threadId)?.id || gameKey(meta.origin, meta.threadId);
+  if (!meta.coverStatus) meta = await metadataClient(meta.origin).withCover(meta);
+  const match = store.data.games.find(game => gameMatchesThread(game, meta));
+  if (sameThread(match?.alternateThread, meta)) return match.id;
+  const id = match?.id || gameKey(meta.origin, meta.threadId);
   await store.update(state => {
     const existing = state.games.find(game => game.id === id);
-    if (existing) Object.assign(existing, { ...meta, engine: meta.engine === 'custom' ? existing.engine : meta.engine });
-    else state.games.unshift(newGame(meta));
+    if (existing) applyForumMetadata(state, existing.id, meta);
+    else {
+      const game = newGame(meta);
+      recordForumRelease(game, meta);
+      state.games.unshift(game);
+    }
   });
   return id;
 }
@@ -89,11 +125,12 @@ function metadataClient(source = store.data.settings.site) {
     });
     metadataRequests = request.then(() => {}, () => {});
     return request;
-  }, data => {
+  }, (data, { gallery = false } = {}) => {
     const image = nativeImage.createFromBuffer(data);
     if (image.isEmpty()) throw new Error('The cover image could not be decoded.');
-    const size = image.getSize(), scale = Math.min(1, 640 / size.width, 400 / size.height);
-    return image.resize({ width: Math.max(1, Math.round(size.width * scale)), height: Math.max(1, Math.round(size.height * scale)) }).toDataURL();
+    const size = image.getSize(), scale = Math.min(1, (gallery ? 1280 : 640) / size.width, (gallery ? 850 : 400) / size.height);
+    const resized = image.resize({ width: Math.max(1, Math.round(size.width * scale)), height: Math.max(1, Math.round(size.height * scale)) });
+    return gallery ? 'data:image/jpeg;base64,' + resized.toJPEG(82).toString('base64') : resized.toDataURL();
   }, { renderListing: (url, source) => browser.readListing(url, source) });
 }
 async function refreshLocalDetails(id) {
@@ -112,7 +149,7 @@ async function refreshDetails(id) {
     await refreshLocalDetails(id);
     const game = getGame(id);
     if (game.threadUrl) {
-      const metadata = await metadataClient(game.origin).thread(game.threadUrl);
+      const metadata = await metadataClient(game.origin).thread(game.threadUrl, { cover: !game.coverPinned });
       await store.update(state => { applyForumMetadata(state, id, metadata); });
       if (metadata.coverError) await store.log('Cover needs attention', metadata.coverError);
     }
@@ -121,22 +158,28 @@ async function refreshDetails(id) {
 }
 async function scanLibrary({ startup = false } = {}) {
   if (store.data.libraryScan.active) throw new Error('A folder scan is already running.');
-  const root = store.data.settings.gamesRoot;
+  const roots = gamesFolders(store.data.settings), root = roots[0];
   if (!root) { if (startup) return; throw new Error('Choose your games folder in Settings first.'); }
   libraryScanController = new AbortController();
+  const signal = libraryScanController.signal;
   await store.update(state => { state.libraryScan = { active: true, message: 'Looking for existing games…', candidates: [], warnings: [] }; });
   try {
-    const presence = await inspectLibraryPresence([...store.data.games], root, { signal: libraryScanController.signal });
+    const presence = await inspectLibraryPresence([...store.data.games], roots, { signal });
     await store.update(state => applyLibraryPresence(state, presence));
-    if (!presence.rootAvailable) {
-      const result = { root, candidates: [], warnings: [`Games folder unavailable (${presence.rootError}). Reconnect it and scan again.`], inspected: 0 };
-      await store.update(state => { state.libraryScan = { active: false, message: result.warnings[0], candidates: [], warnings: result.warnings }; });
-      return result;
-    }
+    const result = { root, candidates: [], warnings: [], inspected: 0 };
     let last = 0;
-    const result = await discoverGames(root, { signal: libraryScanController.signal, installedGames: store.data.games, existing: [...store.data.games.flatMap(game => [game.installation?.root, ...game.previous.map(item => item.root)]).filter(Boolean), ...(startup ? store.data.ignoredGameRoots || [] : [])], downloads: store.data.downloads, progress: ({ count, found }) => {
-      if (Date.now() - last > 300) { last = Date.now(); void store.update(state => { state.libraryScan.message = `Checked ${count} folders · ${found} items found`; }); }
-    }});
+    for (const folder of roots) {
+      if (presence.unavailable.has(folder)) {
+        result.warnings.push('Games folder unavailable: ' + folder + ' (' + presence.unavailable.get(folder) + ').');
+        continue;
+      }
+      const scan = await discoverGames(folder, { signal, installedGames: store.data.games, existing: [...store.data.games.flatMap(game => [game.installation?.root, ...game.previous.map(item => item.root)]).filter(Boolean), ...(startup ? store.data.ignoredGameRoots || [] : [])], downloads: store.data.downloads, progress: ({ count, found }) => {
+        if (Date.now() - last > 300) { last = Date.now(); void store.update(state => { state.libraryScan.message = 'Checked ' + (result.inspected + count) + ' folders · ' + (result.candidates.length + found) + ' items found'; }); }
+      }});
+      result.inspected += scan.inspected;
+      result.candidates.push(...scan.candidates.map(candidate => ({ ...candidate, collectionRoot: folder })));
+      result.warnings.push(...scan.warnings);
+    }
     await store.update(state => {
       let added = 0;
       if (startup) for (const candidate of result.candidates) {
@@ -158,10 +201,11 @@ async function scanLibrary({ startup = false } = {}) {
 async function prepareImports(ids = []) {
   if (!Array.isArray(ids) || ids.length > 500) throw new Error('Choose up to 500 discovered games at a time.');
   if (store.data.libraryScan.active) throw new Error('Wait for the folder scan to finish.');
-  const root = await requireRoot(), imports = [];
+  const imports = [];
   for (const id of new Set(ids)) {
     const candidate = store.data.libraryScan.candidates.find(item => item.id === id);
-    if (!candidate) throw new Error('A selected result is no longer available. Scan your games folder again.');
+    if (!candidate || !gamesFolders(store.data.settings).includes(candidate.collectionRoot)) throw new Error('A selected result is no longer available. Scan your games folders again.');
+    const root = await realDirectory(candidate.collectionRoot);
     await assertNoLinks(root, candidate.root);
     if (await realDirectory(candidate.root) !== candidate.root) throw new Error('A game folder moved since the scan. Scan again.');
     if (candidate.kind === 'archive') {
@@ -208,7 +252,7 @@ async function cleanupArchive(job) {
 async function cleanupPartial(id) {
   const job = getJob(id);
   try {
-    if (await removePartialDownload(job, { gamesRoot: store.data.settings.gamesRoot, games: store.data.games, downloads: store.data.downloads })) await updateJob(id, { partialRemoved: true, partialCleanupError: '', phase: 'Incomplete file removed. Open the game thread to download again.' });
+    if (await removePartialDownload(job, { gamesRoot: job.downloadRoot || containingGamesFolder(store.data.settings, job.path), games: store.data.games, downloads: store.data.downloads })) await updateJob(id, { partialRemoved: true, partialCleanupError: '', phase: 'Incomplete file removed. Open the game thread to download again.' });
   } catch (error) { await updateJob(id, { partialCleanupError: error.message }); }
 }
 function placeManagedRelease(root, container, gameRoot, title) {
@@ -224,18 +268,74 @@ function placeManagedRelease(root, container, gameRoot, title) {
   renameSync(container, destination);
   return destination;
 }
-async function install(id, mode = 'auto') {
+function installGamesFolder(job, game) {
+  const settings = store.data.settings;
+  if ((job.extractedPath || job.stagingPath) && job.installRoot) return job.installRoot;
+  if (game.preferredGamesRoot || game.installation) return gamesFolderFor(settings, game);
+  return job.downloadRoot || containingGamesFolder(settings, job.path) || gamesFolderFor(settings, game);
+}
+function displaySize(bytes) {
+  if (bytes >= 1024 ** 3) return (bytes / 1024 ** 3).toFixed(1) + ' GiB';
+  return (bytes / 1024 ** 2).toFixed(1) + ' MiB';
+}
+async function reviewInstall({ root, job, game, mode, original, signal, fromDownload }) {
+  const engine = job.thread?.engine && job.thread.engine !== 'custom' ? job.thread.engine : game.engine;
+  const plan = original ? await savePlan(original.root, engine, game.saveOverrides) : null;
+  const files = new Set(plan?.local.map(item => path.dirname(item.source)) || []);
+  const saves = [...[...files].map(folder => 'Local: ' + folder), ...(plan?.external || []).map(folder => 'External: ' + folder)];
+  let required = mode === 'zip' ? await zipExpandedSize(job.path, signal) : 0;
+  for (const item of plan?.local || []) required += (await fs.stat(item.source)).size;
+  const volume = await fs.statfs(root).catch(error => {
+    if (['ENOSYS', 'ENOTSUP'].includes(error.code)) return null;
+    throw error;
+  });
+  const free = volume ? volume.bavail * volume.bsize : null;
+  if (free != null && required > free && (mode === 'zip' || mode === 'resume' && job.stagingPath)) {
+    throw new Error('Not enough space in ' + root + '. Need at least ' + displaySize(required) + '; available ' + displaySize(free) + '.');
+  }
+  signal.throwIfAborted();
+  const update = original ? 'Update' : 'Install';
+  const detail = [
+    (mode === 'zip' ? 'Destination: ' : 'Games folder: ') + root,
+    'Available space: ' + (free == null ? 'Unavailable' : displaySize(free)) + (mode === 'zip' ? ' · Estimated extraction and saves: ' + displaySize(required) : ''),
+    ...(saves.length ? ['Detected save locations:', ...saves.slice(0, 8), ...(saves.length > 8 ? [String(saves.length - 8) + ' more in the Saves panel.'] : [])] : ['No save locations detected.']),
+    ...(mode === 'resume' && job.extractedPath ? ['Resume from: ' + job.extractedPath] : []),
+    ...(mode === 'folder' || mode === 'external'
+      ? [manualInstallReason(job, engine) || 'You’ll select the extracted game folder to finish.'] : []),
+    'Close the game before continuing.'
+  ].join('\n');
+  const choice = await dialog.showMessageBox(window, {
+    type: 'question', message: fromDownload ? job.filename + ' is ready. ' + update + ' the game?' : update + ' ' + game.title + '?',
+    detail, buttons: [fromDownload ? 'Keep download only' : 'Cancel', update + ' game'], defaultId: 1, cancelId: 0
+  });
+  return choice.response === 1;
+}
+async function discardStaging(root, staging) {
+  const parent = path.join(root, '.library', 'staging');
+  if (path.dirname(staging) !== parent || !/^[0-9a-f-]{36}$/i.test(path.basename(staging))) return;
+  await assertNoLinks(root, staging);
+  await fs.rm(staging, { recursive: true, force: true });
+}
+async function install(id, mode = 'auto', fromDownload = false) {
   const job = getJob(id), game = getGame(job.gameId);
+  let alternateDownload = false;
   if (job.thread?.threadUrl) {
     const ref = sourceThreadReference(store.data.settings, job.thread.threadUrl);
-    if (store.data.games.some(other => other.id !== game.id && other.installation && other.origin === ref.origin && other.threadId === ref.threadId)) throw new Error('This source thread already belongs to another installed game. Choose its library entry first.');
+    if (store.data.games.some(other => other.id !== game.id && other.installation && gameMatchesThread(other, ref))) throw new Error('This source thread already belongs to another installed game. Choose its library entry first.');
+    alternateDownload = sameThread(game.alternateThread, ref);
   }
-  if (!canInstallArchive(job) || !await exists(job.path)) throw new Error('Select a completed archive that is still on disk. Failed or cancelled downloads must be downloaded again.');
+  const extractedAvailable = job.extractedPath && await exists(job.extractedPath);
+  if (!canInstallArchive(job) || !extractedAvailable && !await exists(job.path)) throw new Error('The archive and any previous extraction are unavailable. Download the release again.');
+  if (mode === 'external' && !await exists(job.path)) throw new Error('The archive is unavailable. Select the extracted game folder instead.');
   if (operations.has(game.id)) throw new Error('This game already has an active installation.');
+  if (htmlGameOpen(game.id)) throw new Error('Close the game window before installing an update.');
   // Normal ZIP installation is managed end to end, even if an external app
   // is configured for other formats or explicit manual extraction.
-  if (mode === 'auto') mode = job.status === 'awaiting-folder' || job.extractedPath ? 'resume' : /\.zip$/i.test(job.path) ? 'zip' : 'external';
-  const root = await requireRoot(), controller = new AbortController();
+  if (mode === 'auto') {
+    const zip = /\.zip$/i.test(job.path);
+    mode = extractedAvailable || job.status === 'awaiting-folder' && !(zip && job.stagingPath) ? 'resume' : zip ? 'zip' : 'external';
+  }
+  const root = await requireRoot(installGamesFolder(job, game)), controller = new AbortController();
   if (operations.has(game.id)) throw new Error('This game already has an active installation.');
   operations.set(game.id, controller);
   let original;
@@ -245,7 +345,10 @@ async function install(id, mode = 'auto') {
   let staging = '', newRoot = '';
   try {
     original = game.installation && await exists(game.installation.root) ? game.installation : null;
-    await updateJob(id, { status: 'installing', error: '', phase: 'Preparing installation' });
+    const previousRoot = game.installation?.gamesRoot || containingGamesFolder(store.data.settings, game.installation?.root);
+    if (!original && previousRoot && !await exists(previousRoot)) throw new Error('Reconnect the current game drive before updating so its saves can be transferred.');
+    if (!await reviewInstall({ root, job, game, mode, original, signal: controller.signal, fromDownload })) return;
+    await updateJob(id, { status: 'installing', installRoot: root, error: '', phase: 'Preparing installation' });
     const threadUrl = job.thread?.threadUrl || game.threadUrl;
     if (threadUrl) {
       await updateJob(id, { phase: 'Reading linked forum details and cover' });
@@ -279,7 +382,9 @@ async function install(id, mode = 'auto') {
       if (!/\.zip$/i.test(job.path)) throw new Error('Use your external extractor for this format, then select the extracted folder. Patches and installers require manual installation.');
       await assertNoLinks(root, stagingRoot);
       await fs.mkdir(stagingRoot, { recursive: true });
+      if (job.stagingPath) await discardStaging(root, job.stagingPath);
       staging = path.join(stagingRoot, randomUUID());
+      await updateJob(id, { stagingPath: staging, extractedPath: '', phase: 'Extracting the ZIP' });
       let last = 0;
       newRoot = await extractZip(job.path, staging, { signal: controller.signal, progress: (count, total) => {
         if (Date.now() - last > 500) { last = Date.now(); void updateJob(id, { phase: `Extracting ${count} of ${total} files` }); }
@@ -311,11 +416,12 @@ async function install(id, mode = 'auto') {
     const destination = managed ? placeManagedRelease(root, container, newRoot, installGame.title) : container;
     const installedRoot = path.join(destination, path.relative(container, newRoot));
     const launch = path.join(destination, path.relative(container, selected.launch));
-    const installation = { root: installedRoot, container: destination, launch, managed, manifest, at: Date.now(), version: localMetadata.version || job.version || '' };
+    const installation = { root: installedRoot, container: destination, gamesRoot: managed ? root : containingGamesFolder(store.data.settings, installedRoot), launch, managed, manifest, at: Date.now(), version: localMetadata.version || job.version || '' };
     await store.update(state => {
       applyDownloadSource(state, game.id, job);
-      if (forumMetadata) applyForumMetadata(state, game.id, forumMetadata);
+      if (forumMetadata && !alternateDownload) applyForumMetadata(state, game.id, forumMetadata);
       const target = state.games.find(item => item.id === game.id);
+      if (alternateDownload && forumMetadata) recordForumRelease(target, forumMetadata);
       if (original) target.previous.push(original);
       target.installation = installation; target.installedVersion = installation.version;
       target.availability = { status: 'available', reason: '', checkedAt: Date.now() };
@@ -334,14 +440,24 @@ async function install(id, mode = 'auto') {
     const retention = game.retention === 'default' ? store.data.settings.retention : game.retention;
     const previous = getGame(game.id).previous;
     const remove = retention === 'delete' ? previous : retention === 'previous' ? previous.slice(0, -1) : [];
-    for (const old of remove) if (old.managed && isInside(root, old.container) && !isInside(old.container, installedRoot, true)) {
+    for (const old of remove) if (old.managed && old.container && !isInside(old.container, installedRoot, true)) {
+      const oldRoot = old.gamesRoot || containingGamesFolder(store.data.settings, old.container);
+      if (!oldRoot || !isInside(oldRoot, old.container)) continue;
       try {
-        await assertNoLinks(root, old.container); await fs.rm(old.container, { recursive: true });
+        await assertNoLinks(oldRoot, old.container); await fs.rm(old.container, { recursive: true });
         await store.update(state => { const target = state.games.find(item => item.id === game.id); target.previous = target.previous.filter(item => item.container !== old.container); });
       } catch (error) { await store.log('Old-version cleanup failed', error.message); }
     }
   } catch (error) {
-    if (getJob(id).status !== 'installed') await updateJob(id, { status: getJob(id).extractedPath ? 'awaiting-folder' : 'downloaded', error: error.message, phase: 'Installation not completed — archive retained' });
+    if (getJob(id).status !== 'installed') {
+      if (staging && !getJob(id).extractedPath) {
+        try { await discardStaging(root, staging); await updateJob(id, { stagingPath: '' }); }
+        catch (cleanupError) { await store.log('Extraction staging cleanup failed', cleanupError.message); }
+      }
+      const ready = Boolean(getJob(id).extractedPath);
+      await updateJob(id, { status: ready ? 'awaiting-folder' : 'downloaded', error: error.message,
+        phase: ready ? 'Extraction is ready. Finish installation or select its launcher.' : 'Installation stopped. Retry or use the external extractor.' });
+    }
     await store.log('Installation did not complete', `Thread ${game.threadId}: ${error.message}`);
     throw error;
   } finally { operations.delete(game.id); notify(); }
@@ -350,17 +466,20 @@ async function captureDownload(item, sourceGameId, thread) {
   const id = randomUUID();
   try {
     // Electron must receive the destination during the synchronous will-download event.
-    const root = store.data.settings.gamesRoot;
+    const settings = store.data.settings;
+    const ref = thread?.threadUrl ? sourceThreadReference(settings, thread.threadUrl) : null;
+    const game = ref ? store.data.games.find(item => gameMatchesThread(item, ref)) : store.data.games.find(item => item.id === sourceGameId);
+    const root = gamesFolderFor(settings, game);
     if (!root) throw new Error('Choose your games folder in Settings before downloading.');
-    accessSync(root, constants.W_OK);
+    try { accessSync(root, constants.W_OK); } catch { throw new Error('Games folder is offline or not writable: ' + root); }
     const filename = safeName(item.getFilename());
     let savePath = path.join(root, filename);
     if (existsSync(savePath)) savePath = path.join(root, `${id.slice(0, 6)}-${filename}`);
     item.setSavePath(savePath);
-    const job = { id, gameId: null, thread: thread || null, filename: path.basename(savePath), path: savePath, managedDownload: true, status: 'downloading', received: 0, total: item.getTotalBytes(), at: Date.now(), version: '', error: '', archiveRemoved: false };
+    const job = { id, gameId: null, thread: thread || null, filename: path.basename(savePath), path: savePath, downloadRoot: root, managedDownload: true, status: 'downloading', received: 0, total: item.getTotalBytes(), at: Date.now(), version: '', error: '', archiveRemoved: false };
     void store.update(state => {
       const game = ensureDownloadGame(state, { gameId: sourceGameId, thread });
-      job.gameId = game?.id || null; job.version = thread?.latestVersion || game?.latestVersion || '';
+      job.gameId = game?.id || null; job.version = thread?.latestVersion || (ref && !sameThread(game, ref) ? '' : game?.latestVersion) || '';
       state.downloads.unshift(job);
     });
     activeItems.set(id, item);
@@ -376,27 +495,135 @@ async function captureDownload(item, sourceGameId, thread) {
         if (status !== 'completed') await cleanupPartial(id);
         const completed = getJob(id);
         if (status === 'completed' && offerInstallation(store.data.settings, completed) && !operations.has(completed.gameId)) {
-          const updating = Boolean(getGame(completed.gameId).installation);
-          const answer = await dialog.showMessageBox(window, { type: 'question', message: `${completed.filename} is ready. ${updating ? 'Update' : 'Install'} the game?`, detail: 'ZIP releases are extracted and registered automatically, including launcher detection, local version checks and linked forum details. Close the game before updating. Patches and executable installers need manual installation. Only identified saves and preferences transfer.', buttons: ['Keep download only', updating ? 'Update game' : 'Install game'], defaultId: 1, cancelId: 0 });
-          if (answer.response) await install(id);
+          await install(id, 'auto', true);
         }
       })().catch(error => { if (window && !window.isDestroyed()) window.webContents.send('library:notice', error.message); void store.log('Download completion needs attention', error.message); });
     });
   } catch (error) { item.cancel(); if (window && !window.isDestroyed()) window.webContents.send('library:notice', error.message); await store.log('Download could not start', error.message); }
 }
-async function checkUpdates(full = false) { return checkAllSourceUpdates({ store, clientForSource: site => metadataClient(site), full }); }
+async function checkUpdates(full = false) {
+  const watched = [];
+  const result = await checkAllSourceUpdates({ store, clientForSource: site => metadataClient(site), full, onWatchedRelease: release => watched.push(release) });
+  if (!watched.length) return result;
+  await store.update(state => {
+    for (const release of watched) state.history.unshift({ at: Date.now(), message: 'Watched release available', details: release.version, gameId: release.gameId });
+    state.history = state.history.slice(0, 200);
+  });
+  if (window?.isFocused() || !Notification.isSupported()) {
+    window?.webContents.send('library:notice', watched.length === 1 ? 'A watched game has a new release. See Activity.' : watched.length + ' watched releases are available. See Activity.');
+    return result;
+  }
+  for (const release of watched) {
+    const notice = new Notification({ title: 'AfterShelf', body: 'A watched game has a new release.' });
+    watchNotifications.add(notice);
+    for (const event of ['close', 'failed']) notice.once(event, () => watchNotifications.delete(notice));
+    notice.once('click', () => {
+      watchNotifications.delete(notice);
+      if (!window || window.isDestroyed()) return;
+      if (window.isMinimized()) window.restore();
+      window.show();
+      window.focus();
+      window.webContents.send('library:show-game', release.gameId);
+    });
+    notice.show();
+  }
+  return result;
+}
+async function attachArchive(id, input) {
+  const game = getGame(id);
+  if (operations.has(id)) throw new Error('Wait for this game’s active work to finish.');
+  if (typeof input !== 'string' || !path.isAbsolute(input) || !isArchiveName(path.basename(input))) throw new Error('Choose one full-release archive.');
+  const file = await fs.realpath(input);
+  if (!isArchiveName(path.basename(file))) throw new Error('Choose a supported archive file.');
+  const stat = await fs.stat(file);
+  if (!stat.isFile()) throw new Error('Choose a regular archive file.');
+  const job = { id: randomUUID(), gameId: game.id, filename: path.basename(file), path: file, status: 'downloaded', at: Date.now(), version: game.latestVersion, total: stat.size, received: stat.size, error: '', archiveRemoved: false };
+  await store.update(state => {
+    getGame(id);
+    if (operations.has(id)) throw new Error('Wait for this game’s active work to finish.');
+    if (state.downloads.some(item => item.path === file && !item.archiveRemoved && !item.partialRemoved)) throw new Error('That archive is already in Downloads.');
+    state.downloads.unshift(job);
+  });
+  return job.id;
+}
 
 const actions = {
   snapshot: () => ({ ...store.snapshot(), runtime: currentRuntime(), browser: browser.state() }),
   'apply-app-update': async () => {
     if (!appUpdater) throw new Error('Application updater is not initialized.');
     const result = await appUpdater.applyOnRestart();
+    closeHtmlGames();
     await store.flush();
     quitConfirmed = true;
     app.quit();
     return result;
   },
-  'choose-root': async () => { const root = await chooseFolder('Choose your games and downloads folder'); if (root) await store.update(state => { state.settings.gamesRoot = root; }); return root; },
+  'choose-root': async () => {
+    const root = await chooseFolder('Choose your default games and downloads folder');
+    if (!root) return null;
+    await store.update(({ settings }) => {
+      const extra = (settings.extraGamesRoots || []).filter(folder => folder !== root);
+      if (extra.some(folder => isInside(folder, root) || isInside(root, folder))) throw new Error('Choose a folder that does not overlap an additional games folder.');
+      const previous = settings.gamesRoot;
+      if (previous && previous !== root && !isInside(root, previous) && !isInside(previous, root)) extra.push(previous);
+      settings.gamesRoot = root;
+      settings.extraGamesRoots = [...new Set(extra)];
+    });
+    return root;
+  },
+  'add-games-root': async () => {
+    const root = await chooseFolder('Choose an additional games folder');
+    if (!root) return;
+    await store.update(({ settings }) => {
+      const roots = gamesFolders(settings);
+      if (roots.includes(root)) return;
+      if (roots.some(folder => isInside(folder, root) || isInside(root, folder))) throw new Error('Choose a folder outside the other games folders.');
+      settings.extraGamesRoots = [...(settings.extraGamesRoots || []), root];
+    });
+  },
+  'remove-games-root': root => store.update(state => {
+    if (!(state.settings.extraGamesRoots || []).includes(root)) return;
+    const used = state.games.some(game => game.preferredGamesRoot === root || [game.installation, ...game.previous].some(install =>
+      install?.root && (install.gamesRoot === root || isInside(root, install.root, true))));
+    const pending = state.downloads.some(job => !job.archiveRemoved && !job.partialRemoved && job.path && isInside(root, job.path));
+    if (used || pending) throw new Error('This folder is still used by games or downloads in your library.');
+    state.settings.extraGamesRoots = state.settings.extraGamesRoots.filter(folder => folder !== root);
+  }),
+  'set-game-folder': ({ id, root }) => {
+    const game = getGame(id);
+    if (operations.has(id)) throw new Error('Wait for this game’s active work to finish.');
+    if (root && !gamesFolders(store.data.settings).includes(root)) throw new Error('Choose a configured games folder.');
+    return store.update(() => { game.preferredGamesRoot = root || ''; });
+  },
+  'skip-game-update': ({ id, version }) => {
+    const game = getGame(id);
+    if (!game.installation || !hasUpdate(game) || game.latestVersion !== version) throw new Error('The current release changed. Refresh the game details.');
+    return store.update(() => { game.skippedUpdate = { origin: game.origin, threadId: game.threadId, version }; });
+  },
+  'restore-game-update': id => {
+    const game = getGame(id);
+    if (updateSkipped(game)) return store.update(() => { delete game.skippedUpdate; });
+  },
+  'set-alternate-thread': ({ id, url }) => {
+    const game = getGame(id);
+    if (!game.threadUrl) throw new Error('Link a primary forum thread first.');
+    if (operations.has(id)) throw new Error('Wait for this game’s active work to finish.');
+    const ref = text(url) ? sourceThreadReference(store.data.settings, text(url)) : null;
+    if (ref?.origin === game.origin) throw new Error('Use the other website for the alternate thread.');
+    if (ref && store.data.games.some(other => other.id !== id && gameMatchesThread(other, ref))) throw new Error('That thread is already linked to another game.');
+    return store.update(() => { game.alternateThread = ref; });
+  },
+  'promote-alternate-thread': async id => {
+    const game = getGame(id), ref = game.alternateThread;
+    if (!ref) throw new Error('Add an alternate thread first.');
+    if (operations.has(id) || store.data.scan.active) throw new Error('Wait for the current installation or update check.');
+    const meta = await metadataClient(ref.origin).thread(ref.threadUrl);
+    await store.update(state => {
+      if (getGame(id).alternateThread !== ref || operations.has(id) || state.scan.active) throw new Error('The game link or operation changed. Try again.');
+      // Clear the former source's version if the new thread does not report one.
+      applyForumMetadata(state, id, { latestVersion: '', ...meta });
+    });
+  },
   'choose-extractor': async () => {
     const result = await dialog.showOpenDialog(window, { title: 'Select your extraction application', defaultPath: process.platform === 'darwin' ? '/Applications' : undefined, properties: ['openFile', 'openDirectory'] });
     if (!result.canceled) await store.update(state => { state.settings.extractor = result.filePaths[0]; });
@@ -445,9 +672,35 @@ const actions = {
   'add-thread': async input => {
     const url = text(input?.url); const ref = sourceThreadReference(store.data.settings, url);
     if (input?.manual) return addMeta({ ...ref, title: text(input.title) || `Thread ${ref.threadId}`, engine: ENGINES.some(([id]) => id === input.engine) ? input.engine : 'custom', latestVersion: text(input.version).slice(0,100) });
-    return addMeta(await metadataClient(ref.origin).thread(ref.threadUrl, { cover: false }));
+    return addMeta(await metadataClient(ref.origin).thread(ref.threadUrl));
   },
   'refresh-game-details': id => refreshDetails(id),
+  'game-gallery': async ({ id, mode }) => {
+    const game = getGame(id);
+    if (!game.threadUrl) return { photos: [], hasMore: false, failed: 0 };
+    const ref = sourceThreadReference(store.data.settings, game.threadUrl);
+    const gallery = await threadGallery.load(ref, metadataClient(ref.origin), mode);
+    const current = getGame(id);
+    if (!sameThread(current, ref)) throw new Error('The linked thread changed. Reopen the gallery to load its photos.');
+    const first = gallery.photos[0];
+    if (first && !current.coverPinned && (!current.coverImageId || mode === 'refresh') && current.coverImageId !== first.id) {
+      await store.update(() => {
+        Object.assign(current, { cover: first.src, coverImageId: first.id, coverStatus: 'cached', coverError: '' });
+      });
+    }
+    return gallery;
+  },
+  'choose-game-cover': async ({ id, photoId }) => {
+    const game = getGame(id);
+    const ref = sourceThreadReference(store.data.settings, game.threadUrl);
+    const photo = await threadGallery.choose(ref, photoId);
+    if (!photo) throw new Error('This photo is unavailable. Load the gallery again to choose a cover.');
+    await store.update(() => {
+      const current = getGame(id);
+      if (!sameThread(current, ref)) throw new Error('The linked thread changed. Reopen the gallery.');
+      Object.assign(current, { cover: photo.src, coverImageId: photo.id, coverPinned: Boolean(photoId), coverStatus: 'cached', coverError: '' });
+    });
+  },
   'refresh-library-details': async () => {
     if (store.data.detailScan.active) throw new Error('Library details are already being refreshed.');
     const results = { refreshed: 0, unmatched: 0, coverWarnings: 0, errors: [] };
@@ -463,10 +716,16 @@ const actions = {
     } finally { await store.update(state => { state.detailScan.active = false; }); }
   },
   'find-forum-game': async input => {
-    await refreshLocalDetails(input.id);
+    const query = text(input.query);
+    if (!query) await refreshLocalDetails(input.id);
     const game = getGame(input.id);
-    const source = input.sourceId ? sourceById(store.data.settings, input.sourceId) : game.threadUrl ? sourceForUrl(store.data.settings, game.threadUrl) : store.data.settings.site;
-    return metadataClient(source).search(text(input.query) || game.localMetadata?.title || game.title);
+    const settings = store.data.settings;
+    const source = input.sourceId ? sourceById(settings, input.sourceId) : gameSearchSource(settings, game);
+    const client = metadataClient(source);
+    if (query) return client.search(query);
+    const title = game.localMetadata?.title || game.title;
+    const matches = await client.search(title);
+    return matches.length || title === game.title ? matches : client.search(game.title);
   },
   'link-forum-game': async input => {
     getGame(input.id);
@@ -488,6 +747,8 @@ const actions = {
       else { if (ref) Object.assign(game, ref); game.title = text(input.title).slice(0,200) || game.title; if (ENGINES.some(([id]) => id === input.engine)) game.engine = input.engine; game.latestVersion = text(input.latestVersion).slice(0,100); }
       if (input.installedVersion != null && text(input.installedVersion) !== game.installedVersion) { game.installedVersion = text(input.installedVersion).slice(0,100); game.installedVersionSource = 'manual'; if (game.installation) game.installation.version = game.installedVersion; }
       if (['default', 'keep', 'previous', 'delete'].includes(input.retention)) game.retention = input.retention;
+      if (typeof input.notes === 'string') game.notes = input.notes.trim().slice(0, 4000);
+      if (PLAY_STATUSES.some(([status]) => status === input.playStatus)) game.playStatus = input.playStatus;
     });
   },
   'register-game': async input => {
@@ -495,22 +756,131 @@ const actions = {
     if (!root) return;
     const selected = await chooseLaunch(root, game.engine); if (!selected) return;
     const metadata = await readLocalMetadata(root, game.engine === 'custom' ? selected.info.engine : game.engine);
-    await store.update(state => { const target = state.games.find(item => item.id === game.id); target.installation = { root, container: root, launch: selected.launch, managed: false, version: text(input.version) || metadata.version || '', at: Date.now() }; target.availability = { status: 'available', reason: '', checkedAt: Date.now() }; target.installedVersion = target.installation.version; target.installedVersionSource = text(input.version) ? 'manual' : metadata.versionSource; target.localMetadata = metadata; if (target.engine === 'custom') target.engine = selected.info.engine; });
+    await store.update(state => { const target = state.games.find(item => item.id === game.id); target.installation = { root, container: root, gamesRoot: containingGamesFolder(state.settings, root), launch: selected.launch, managed: false, version: text(input.version) || metadata.version || '', at: Date.now() }; target.availability = { status: 'available', reason: '', checkedAt: Date.now() }; target.installedVersion = target.installation.version; target.installedVersionSource = text(input.version) ? 'manual' : metadata.versionSource; target.localMetadata = metadata; if (target.engine === 'custom') target.engine = selected.info.engine; });
   },
-  'launch-game': async id => { const game = getGame(id); if (!canLaunchGame(game)) throw new Error(game.availability?.reason || 'Use Locate installed game to choose this game’s launch file first.'); if (operations.has(id)) throw new Error('Wait for this game’s installation to finish.'); const error = await shell.openPath(game.installation.launch); if (error) throw new Error(error); await store.log('Game launched', game.threadId ? `Thread ${game.threadId}` : 'Local game'); },
+  'launch-game': async id => {
+    const game = getGame(id);
+    if (!canLaunchGame(game)) throw new Error(game.availability?.reason || 'Use Locate installed game to choose this game’s launch file first.');
+    if (operations.has(id)) throw new Error('Wait for this game’s installation to finish.');
+    if (/\.html?$/i.test(game.installation.launch)) {
+      if (htmlGameOpen(id)) { await launchHtmlGame(game); return; }
+      await launchHtmlGame(game, session => {
+        void store.update(state => { const target = state.games.find(item => item.id === id); if (target) recordHtmlSession(target, session); })
+          .catch(error => console.error('Play session could not be saved:', error.message));
+      });
+    }
+    else {
+      const error = await shell.openPath(game.installation.launch);
+      if (error) throw new Error(error);
+    }
+    await store.update(state => { const target = state.games.find(item => item.id === id); if (target) target.lastLaunchedAt = Date.now(); });
+    await store.log('Game launched', game.threadId ? `Thread ${game.threadId}` : 'Local game');
+  },
+  'launch-html-browser': async id => {
+    const game = getGame(id);
+    if (!canLaunchGame(game) || !/\.html?$/i.test(game.installation.launch)) throw new Error('No HTML launcher is available.');
+    const error = await shell.openPath(game.installation.launch);
+    if (error) throw new Error(error);
+  },
+  'toggle-watch': id => {
+    const game = getGame(id);
+    if (!game.threadUrl) throw new Error('Link a forum thread before watching for releases.');
+    return store.update(() => { game.watching = !game.watching; if (game.watching) recordForumRelease(game, game); });
+  },
+  'storage-by-drive': () => storageByDrive(store.snapshot(), gamesFolders(store.data.settings)),
+  'toggle-favorite': id => {
+    const game = getGame(id);
+    return store.update(() => { game.favorite = !game.favorite; });
+  },
   'reveal-game': async id => { const game = getGame(id); if (game.installation) shell.showItemInFolder(game.installation.launch); },
+  'game-saves': id => listGameSaves(getGame(id)),
+  'reveal-save': async ({ id, file }) => {
+    const save = await gameSave(id, file);
+    shell.showItemInFolder(save.file);
+  },
+  'inspect-save': async ({ id, file }) => {
+    const root = getGame(id).installation?.root;
+    const save = await gameSave(id, file);
+    if (save.editor === 'renpy') return { slot: await readRenpySlot(save.file) };
+    if (!['mv', 'mz'].includes(save.editor)) throw new Error('This save format does not have an editor.');
+    const { fields, revision } = await readRpgSave(save.file, save.editor);
+    return { fields: await labelRpgFields(root, file, fields), revision };
+  },
+  'export-save': async ({ id, file, revision, changes }) => {
+    if (operations.has(id)) throw new Error('Wait for this game’s active work to finish.');
+    const save = await gameSave(id, file);
+    const extension = path.extname(save.name);
+    const name = revision ? path.basename(save.name, extension) + '-edited' + extension : save.name;
+    const result = await dialog.showSaveDialog(window, { title: 'Export a save copy', defaultPath: path.join(app.getPath('documents'), name) });
+    if (result.canceled) return false;
+    if (operations.has(id)) throw new Error('Wait for this game’s active work to finish.');
+    await gameSave(id, file);
+    if (!revision) await fs.copyFile(file, result.filePath, constants.COPYFILE_EXCL);
+    else {
+      if (!['mv', 'mz'].includes(save.editor) || path.extname(result.filePath).toLowerCase() !== extension.toLowerCase()) throw new Error('Use the original save file extension for the edited copy.');
+      const data = await readRpgSave(file, save.editor);
+      if (data.revision !== revision) throw new Error('The original save changed. Open it again before exporting.');
+      const output = editRpgSave(data, save.editor, changes);
+      const handle = await fs.open(result.filePath, 'wx', 0o600);
+      try { await handle.writeFile(output); }
+      catch (error) { await handle.close(); await fs.rm(result.filePath, { force: true }); throw error; }
+      finally { await handle.close(); }
+    }
+    return true;
+  },
+  'game-storage': async id => {
+    const game = getGame(id);
+    const installs = [game.installation, ...game.previous].filter(Boolean);
+    const downloads = store.data.downloads.filter(job => job.gameId === id && job.path && !job.archiveRemoved && !job.partialRemoved);
+    return {
+      gamesRoot: gamesFolderFor(store.data.settings, game),
+      versions: await Promise.all(installs.map(async install => ({ root: install.root, ...await measureStorage(installationFolder(install), true) }))),
+      archives: await Promise.all(downloads.map(async job => ({ id: job.id, ...await measureStorage(job.path) })))
+    };
+  },
+  'reveal-version': async ({ id, root }) => {
+    const folder = installationFolder(retainedVersion(getGame(id), root));
+    if (!await exists(folder)) throw new Error('The version folder is unavailable.');
+    shell.showItemInFolder(folder);
+  },
+  'remove-version': async ({ id, root }) => {
+    const game = getGame(id), version = retainedVersion(game, root);
+    if (operations.has(id)) throw new Error('Wait for this game’s active work to finish.');
+    const controller = new AbortController();
+    operations.set(id, controller);
+    try {
+      const answer = await dialog.showMessageBox(window, {
+        type: 'warning', message: 'Delete this previous version?',
+        detail: 'This permanently deletes this version’s folder, including any saves inside it.',
+        buttons: ['Cancel', 'Delete version'], defaultId: 0, cancelId: 0
+      });
+      if (!answer.response) return false;
+      const target = { ...game, installation: version, previous: [] };
+      const options = deletionOptions(removalRoots(target), controller.signal);
+      options.protectedTrees.push(...removalRoots({ ...game, previous: game.previous.filter(item => item !== version) }));
+      const plan = await planGameDeletion(target, store.data.games, options);
+      await deleteGameFiles(plan, { signal: controller.signal });
+      await store.update(() => { game.previous = game.previous.filter(item => item !== version); });
+      return true;
+    } finally { operations.delete(id); notify(); }
+  },
   'scan-saves': async id => { const game = getGame(id); if (!game.installation) throw new Error('Locate the installed game first.'); const plan = await savePlan(game.installation.root, game.engine, game.saveOverrides); await store.update(state => { const target = state.games.find(item => item.id === id); target.savePlan = plan; }); return plan; },
-  'add-save-folder': async id => { const game = getGame(id); const folder = await chooseFolder('Select this game’s save/preferences folder', game.installation?.root); if (folder) await store.update(state => { state.games.find(item => item.id === id).saveOverrides.push(folder); }); },
+  'add-save-folder': async id => {
+    const game = getGame(id);
+    const folder = await chooseFolder('Select this game’s save/preferences folder', game.installation?.root);
+    if (!folder || game.saveOverrides.includes(folder)) return;
+    if (game.installation && isInside(folder, game.installation.root, true)) throw new Error('Choose a dedicated save folder.');
+    await store.update(() => { game.saveOverrides.push(folder); });
+  },
   'check-updates': () => checkUpdates(),
   'check-all-updates': () => checkUpdates(true),
   'attach-archive': async id => {
-    const game = getGame(id); await requireRoot();
-    const result = await dialog.showOpenDialog(window, { title: 'Select the compressed full-release download', defaultPath: store.data.settings.gamesRoot, properties: ['openFile'], filters: [{ name: 'Compressed archives', extensions: ['zip', '7z', 'rar', '001'] }] });
+    const game = getGame(id); const root = await requireRoot(gamesFolderFor(store.data.settings, game));
+    const result = await dialog.showOpenDialog(window, { title: 'Select the compressed full-release download', defaultPath: root, properties: ['openFile'], filters: [{ name: 'Compressed archives', extensions: ['zip', '7z', 'rar', '001'] }] });
     if (result.canceled) return;
-    const file = result.filePaths[0];
-    if (store.data.downloads.some(job => job.path === file && !job.archiveRemoved)) throw new Error('That archive is already in Downloads.');
-    await store.update(state => state.downloads.unshift({ id: randomUUID(), gameId: game.id, filename: path.basename(file), path: file, status: 'downloaded', at: Date.now(), version: game.latestVersion, total: 0, received: 0, error: '', archiveRemoved: false }));
+    return attachArchive(id, result.filePaths[0]);
   },
+  'attach-dropped-archive': input => attachArchive(input.id, input.file),
   'assign-download': async input => {
     await store.update(state => { assignDownloadGame(state, input); });
   },
@@ -534,7 +904,7 @@ const actions = {
     return ids.length;
   },
   'remove-game': async id => {
-    const game = getGame(id); if (operations.has(id) || [...activeItems.keys()].some(jobId => getJob(jobId).gameId === id)) throw new Error('Finish this game’s active work first.');
+    const game = getGame(id); if (htmlGameOpen(id) || operations.has(id) || [...activeItems.keys()].some(jobId => getJob(jobId).gameId === id)) throw new Error('Finish this game’s active work first.');
     const controller = new AbortController(); operations.set(id, controller);
     try {
       const first = await dialog.showMessageBox(window, { type: 'question', message: `Remove ${game.title} from your library?`, detail: 'Next, choose whether to keep or delete its installed files.', buttons: ['Cancel', 'Remove from Library'], defaultId: 0, cancelId: 0 });
@@ -542,13 +912,9 @@ const actions = {
       const choice = await dialog.showMessageBox(window, { type: 'warning', message: 'Keep or delete the game files?', detail: 'Keep files leaves the current and retained versions on disk. Delete game files permanently removes those installation folders and their contents, including local saves and preferences. Downloads and save data outside those folders are kept.', buttons: ['Cancel', 'Keep files', 'Delete game files'], defaultId: 1, cancelId: 0 });
       if (!choice.response) return { removed: false };
       controller.signal.throwIfAborted();
-      const deleting = choice.response === 2, roots = removalRoots(game).filter(root => !store.data.settings.gamesRoot || !isInside(root, store.data.settings.gamesRoot, true));
+      const deleting = choice.response === 2, roots = removalRoots(game).filter(root => !gamesFolders(store.data.settings).some(folder => isInside(root, folder, true)));
       if (deleting) {
-        const plan = await planGameDeletion(game, store.data.games, {
-          collectionRoot: store.data.settings.gamesRoot,
-          protectedRoots: [store.data.settings.gamesRoot, ...(store.data.ignoredGameRoots || []).filter(root => !roots.includes(root)), ...['home', 'desktop', 'documents', 'downloads', 'appData'].map(name => app.getPath(name))],
-          protectedTrees: [app.getPath('userData'), app.getAppPath(), app.getPath('exe')], signal: controller.signal
-        });
+        const plan = await planGameDeletion(game, store.data.games, deletionOptions(roots, controller.signal));
         await deleteGameFiles(plan, { signal: controller.signal });
       }
       controller.signal.throwIfAborted();
@@ -603,6 +969,7 @@ async function start() {
         for (const controller of operations.values()) controller.abort();
         // The old installation is preserved; incomplete destinations are never committed.
         await store.update(state => { for (const job of state.downloads) if (job.status === 'installing') { job.status = 'downloaded'; job.phase = 'Installation not confirmed'; } });
+        closeHtmlGames();
         await store.flush();
         window.close();
       });
@@ -612,6 +979,7 @@ async function start() {
       event.preventDefault();
       if (closingForFlush) return;
       closingForFlush = true;
+      closeHtmlGames();
       void store.flush().catch(error => console.error('Library flush failed:', error.code || error.message)).finally(() => { quitConfirmed = true; window?.close(); });
     }
   });

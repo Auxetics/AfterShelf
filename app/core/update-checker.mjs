@@ -1,4 +1,4 @@
-import { normalizeVersion, versionKnown, versionRelation } from './model.mjs';
+import { normalizeVersion, versionKnown, versionRelation, updateSkipped } from './model.mjs';
 import { applyForumMetadata } from './metadata.mjs';
 import { configuredSources, sourceById } from './sources.mjs';
 
@@ -12,7 +12,7 @@ function updateTime(row, now) {
   const value = Number(row.updatedAt);
   return Number.isFinite(value) && value >= Date.UTC(2000, 0, 1) && value <= now + 300000 ? value : 0;
 }
-export async function checkLibraryUpdates({ store, client, full = false, now = Date.now, maxPages = 20, recheckAfter = 86400000, maxRechecks = 5 }) {
+export async function checkLibraryUpdates({ onWatchedRelease, store, client, full = false, now = Date.now, maxPages = 20, recheckAfter = 86400000, maxRechecks = 5 }) {
   if (store.data.scan.active) return { busy: true };
   const site = structuredClone(store.data.settings.site), startedAt = now();
   const games = store.data.games.filter(game => game.origin === site.origin && game.threadId && game.threadUrl).map(game => ({ ...game }));
@@ -82,7 +82,7 @@ export async function checkLibraryUpdates({ store, client, full = false, now = D
         await store.update(state => {
           const target = state.games.find(item => item.id === game.id);
           if (!target || target.origin !== game.origin || String(target.threadId) !== String(game.threadId) || target.threadUrl !== game.threadUrl) throw new Error('The game link changed during the update check. Retry with its current thread.');
-          applyForumMetadata(state, game.id, metadata); target.versionVerifiedAt = now();
+          applyForumMetadata(state, game.id, metadata, { now: now(), onWatchedRelease }); target.versionVerifiedAt = now();
           const entries = observed.get(String(game.threadId)); if (entries) target.lastFeedFingerprint = observedFingerprint(entries);
         });
         summary.verified++;
@@ -101,8 +101,8 @@ export async function checkLibraryUpdates({ store, client, full = false, now = D
     });
   } catch (error) { errors.push(error.message); }
   const current = store.data.games.filter(game => game.origin === site.origin && game.threadId && game.threadUrl);
-  summary.updates = current.filter(game => game.installation && versionRelation(game.installedVersion, game.latestVersion) === 'newer').length;
-  summary.different = current.filter(game => game.installation && versionRelation(game.installedVersion, game.latestVersion) === 'different').length;
+  summary.updates = current.filter(game => game.installation && !updateSkipped(game) && versionRelation(game.installedVersion, game.latestVersion) === 'newer').length;
+  summary.different = current.filter(game => game.installation && !updateSkipped(game) && versionRelation(game.installedVersion, game.latestVersion) === 'different').length;
   const message = `${errors.length ? 'Update check incomplete' : 'Checked latest feed'} · ${summary.pages} pages / ${summary.entries} entries · ${summary.verified} threads refreshed${summary.reconciledAll ? ' · catch-up completed' : ''} · ${summary.updates} updates${summary.different ? ` · ${summary.different} versions differ` : ''}${summary.unlinked ? ` · ${summary.unlinked} unlinked` : ''}${summary.unknownInstalled ? ` · ${summary.unknownInstalled} installed versions unknown` : ''}`;
   await store.update(state => Object.assign(state.scan, { active: false, message, error: errors.join('\n'), summary }));
   if (errors.length) await store.log('Update check incomplete', errors.join('\n'));
@@ -143,7 +143,7 @@ export async function checkAllSourceUpdates({ store, clientForSource, full = fal
       }
     }
   } catch (error) { errors.push(error.message); }
-  const summary = { mode: 'feed', sources: results, pages: results.reduce((n, result) => n + (result.pages || 0), 0), entries: results.reduce((n, result) => n + (result.entries || 0), 0), verified: results.reduce((n, result) => n + (result.verified || 0), 0), updates: store.data.games.filter(game => game.installation && versionRelation(game.installedVersion, game.latestVersion) === 'newer').length, unlinked: store.data.games.length - linked.length, full };
+  const summary = { mode: 'feed', sources: results, pages: results.reduce((n, result) => n + (result.pages || 0), 0), entries: results.reduce((n, result) => n + (result.entries || 0), 0), verified: results.reduce((n, result) => n + (result.verified || 0), 0), updates: store.data.games.filter(game => game.installation && !updateSkipped(game) && versionRelation(game.installedVersion, game.latestVersion) === 'newer').length, unlinked: store.data.games.length - linked.length, full };
   const message = !sites.length && !unmapped ? 'No linked games to check. Use Find forum match first.' : `${errors.length ? 'Update check incomplete' : 'Checked game sources'} · ${summary.pages} pages / ${summary.entries} entries · ${summary.verified} threads verified · ${summary.updates} updates`;
   await store.update(state => { Object.assign(state.scan, { active: false, message, error: errors.join('\n'), summary }); if (sites.length && !errors.length) state.scan.lastChecked = now(); });
   return { ...summary, message, error: errors.join('\n') };

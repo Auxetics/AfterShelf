@@ -105,6 +105,6 @@ export async function discoverGames(folder, { platform = process.platform, exist
 export function localGame(candidate, origin) {
   return newGame({ id: `local:${candidate.id}`, origin, threadId: '', threadUrl: '', title: candidate.title, engine: candidate.engine,
     installedVersion: candidate.localMetadata?.version || '', installedVersionSource: candidate.localMetadata?.versionSource || '', localMetadata: candidate.localMetadata,
-    installation: { root: candidate.root, container: candidate.root, launch: candidate.launch, managed: false, version: candidate.localMetadata?.version || '', at: Date.now() },
+    installation: { root: candidate.root, container: candidate.root, gamesRoot: candidate.collectionRoot, launch: candidate.launch, managed: false, version: candidate.localMetadata?.version || '', at: Date.now() },
     needsLaunchTarget: !candidate.launch, discoveredLocally: true });
 }

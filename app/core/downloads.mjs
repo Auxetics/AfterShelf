@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 import { ENGINES, newGame, ACTIVE_DOWNLOADS } from './model.mjs';
-import { sourceThreadReference } from './sources.mjs';
+import { sourceThreadReference, gameMatchesThread, sameThread } from './sources.mjs';
 import { applyForumMetadata } from './metadata.mjs';
 
 // Resolve by stable thread identity, never by a similar title or archive name.
@@ -9,10 +9,10 @@ export function ensureDownloadGame(state, { gameId, thread, create } = {}) {
   let ref;
   const supplied = create || thread;
   if (supplied?.threadUrl) ref = sourceThreadReference(state.settings, supplied.threadUrl);
-  let game = state.games.find(item => item.id === gameId && (!ref || item.origin === ref.origin && item.threadId === ref.threadId));
+  let game = state.games.find(item => item.id === gameId && (!ref || gameMatchesThread(item, ref)));
   if (game) return game;
   if (ref) {
-    game = state.games.find(item => item.origin === ref.origin && item.threadId === ref.threadId);
+    game = state.games.find(item => gameMatchesThread(item, ref));
     if (game) return game;
   }
   if (!ref && !create) return null;
@@ -32,6 +32,7 @@ export function applyDownloadSource(state, gameId, job) {
   if (!game) throw new Error('This game no longer exists.');
   if (!job.thread?.threadUrl) return game;
   const ref = sourceThreadReference(state.settings, job.thread.threadUrl);
+  if (sameThread(game.alternateThread, ref)) return game;
   const changed = ref.origin !== game.origin || ref.threadId !== game.threadId;
   return applyForumMetadata(state, gameId, { ...job.thread, ...ref, ...(changed ? { latestVersion: job.version || job.thread.latestVersion || '' } : job.version ? { latestVersion: job.version } : {}) });
 }

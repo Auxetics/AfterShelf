@@ -63,3 +63,26 @@ export async function extractZip(file, destination, { signal, progress = () => {
   if (!count) throw new Error('The ZIP archive is empty.');
   return singlePayloadDirectory(destination);
 }
+
+export async function zipExpandedSize(file, signal) {
+  const zip = await new Promise((resolve, reject) => yauzl.open(file, { lazyEntries: true, validateEntrySizes: true },
+    (error, value) => error ? reject(error) : resolve(value)));
+  let total = 0;
+  try {
+    return await new Promise((resolve, reject) => {
+      if (!zip.entryCount || zip.entryCount > 150000) { reject(new Error('The ZIP is empty or exceeds the extraction limit.')); return; }
+      zip.on('error', reject);
+      zip.on('end', () => resolve(total));
+      zip.on('entry', entry => {
+        try {
+          signal?.throwIfAborted();
+          if (entry.generalPurposeBitFlag & 1) throw new Error('This ZIP is password protected. Use your external extraction app.');
+          total += entry.uncompressedSize;
+          if (total > 100 * 1024 ** 3) throw new Error('The ZIP exceeds the extraction limit.');
+          zip.readEntry();
+        } catch (error) { reject(error); }
+      });
+      zip.readEntry();
+    });
+  } finally { zip.close(); }
+}

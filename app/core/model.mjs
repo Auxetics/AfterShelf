@@ -53,6 +53,7 @@ export function newGame(meta) {
   return { id: gameKey(meta.origin, meta.threadId), addedAt: Date.now(), latestVersion: '', installedVersion: '', engine: 'custom',
     installation: null, previous: [], saveOverrides: [], retention: 'default', ...meta };
 }
+export const PLAY_STATUSES = [['backlog', 'Backlog'], ['playing', 'Playing'], ['finished', 'Finished']];
 export function normalizeVersion(value) { return String(value ?? '').trim().replace(/^v(?=\d)/i, ''); }
 export function versionKnown(value) { return typeof value === 'string' && Boolean(value.trim()) && !/^(?:unknown|unspecified|n\/?a)$/i.test(value.trim()); }
 export function versionRelation(installed, current) {
@@ -72,7 +73,14 @@ export function versionRelation(installed, current) {
   }
   return a.suffix === b.suffix ? 'same' : 'different';
 }
-export function hasUpdate(game) { return ['newer', 'different'].includes(versionRelation(game.installedVersion, game.latestVersion)); }
+export function updateSkipped(game) {
+  const skipped = game.skippedUpdate;
+  return Boolean(skipped && skipped.origin === game.origin && String(skipped.threadId) === String(game.threadId) &&
+    versionRelation(skipped.version, game.latestVersion) === 'same');
+}
+export function hasUpdate(game) {
+  return !updateSkipped(game) && ['newer', 'different'].includes(versionRelation(game.installedVersion, game.latestVersion));
+}
 export function canInstallArchive(job) { return Boolean(job && ['downloaded', 'awaiting-folder'].includes(job.status) && !job.archiveRemoved && typeof job.path === 'string' && job.path); }
 export function offerInstallation(settings, job) { return settings.setupCompleted && settings.downloadMode === 'assisted' && canInstallArchive(job) && Boolean(job.gameId); }
 export const ACTIVE_DOWNLOADS = ['queued', 'downloading', 'retrying'];

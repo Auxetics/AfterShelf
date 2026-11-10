@@ -17,17 +17,22 @@ export function archiveMatchesInstalled(filename, games) {
 }
 
 export async function inspectLibraryPresence(games, gamesRoot, { signal, now = Date.now } = {}) {
-  let rootAvailable = true, rootError = '';
-  try { if (!(await fs.stat(gamesRoot)).isDirectory()) throw new Error('The games folder is not a directory.'); }
-  catch (error) { rootAvailable = false; rootError = error.code || error.message; }
+  const roots = Array.isArray(gamesRoot) ? gamesRoot : [gamesRoot];
+  const unavailable = new Map();
+  for (const folder of roots) {
+    try { if (!(await fs.stat(folder)).isDirectory()) throw new Error('The games folder is not a directory.'); }
+    catch (error) { unavailable.set(folder, error.code || error.message); }
+  }
+  const rootAvailable = !unavailable.has(roots[0]), rootError = unavailable.get(roots[0]) || '';
   const updates = [];
   for (const game of games) {
     signal?.throwIfAborted();
     if (!game.installation) continue;
     const { root, launch } = game.installation;
     let status = 'available', reason = '';
-    if (!rootAvailable && isInside(gamesRoot, root, true)) {
-      status = 'offline'; reason = `Games folder is unavailable (${rootError}).`;
+    const offlineRoot = [...unavailable.keys()].find(folder => isInside(folder, root, true));
+    if (offlineRoot) {
+      status = 'offline'; reason = `Games folder is unavailable (${unavailable.get(offlineRoot)}).`;
     } else {
       try {
         if (!(await fs.stat(root)).isDirectory()) { status = 'missing'; reason = 'The installed game folder is no longer present.'; }
@@ -39,7 +44,7 @@ export async function inspectLibraryPresence(games, gamesRoot, { signal, now = D
     }
     updates.push({ id: game.id, root, launch, availability: { status, reason, checkedAt: now() } });
   }
-  return { rootAvailable, rootError, updates };
+  return { rootAvailable, rootError, updates, unavailable };
 }
 
 export function applyLibraryPresence(state, result) {

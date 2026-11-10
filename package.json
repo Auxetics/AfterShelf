@@ -1,7 +1,7 @@
 {
   "name": "aftershelf",
   "productName": "AfterShelf",
-  "version": "0.6.0-Alpha",
+  "version": "0.7.0-Alpha",
   "description": "A local desktop game library with forum browsing and save-aware updates.",
   "private": true,
   "type": "module",
@@ -17,6 +17,7 @@
   },
   "dependencies": {
     "cheerio": "^1.1.2",
+    "lz-string": "1.5.0",
     "yauzl": "^3.2.0"
   },
   "devDependencies": {
@@ -60,10 +61,10 @@
     "nsisWeb": {
       "oneClick": false,
       "allowToChangeInstallationDirectory": true,
-      "artifactName": "AfterShelf-Web-Setup-0.6-Alpha-${os}-${arch}.${ext}",
-      "appPackageUrl": "https://github.com/Auxetics/AfterShelf/releases/download/0.6-Alpha/aftershelf-0.6.0-Alpha-x64.nsis.7z"
+      "artifactName": "AfterShelf-Web-Setup-0.7-Alpha-${os}-${arch}.${ext}",
+      "appPackageUrl": "https://github.com/Auxetics/AfterShelf/releases/download/0.7-Alpha/aftershelf-0.7.0-Alpha-x64.nsis.7z"
     },
-    "artifactName": "AfterShelf-0.6-Alpha-${os}-${arch}.${ext}",
+    "artifactName": "AfterShelf-0.7-Alpha-${os}-${arch}.${ext}",
     "publish": [
       {
         "provider": "github",

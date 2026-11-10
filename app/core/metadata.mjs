@@ -1,7 +1,9 @@
 import path from 'node:path';
 import * as cheerio from 'cheerio';
 import { assertNoLinks, readSmall } from './files.mjs';
-import { normalizeVersion, versionKnown } from './model.mjs';
+import { normalizeVersion, versionKnown, versionRelation, updateSkipped } from './model.mjs';
+import { sameThread } from './sources.mjs';
+import { previouslyNotified, recordForumRelease, rememberWatchedRelease } from './release-history.mjs';
 
 function plistValues(text) {
   const $ = cheerio.load(text, { xml: true }), result = {};
@@ -47,19 +49,39 @@ export function applyLocalMetadata(game, metadata, { force = false } = {}) {
     game.installedVersionSource = metadata.versionSource;
   }
 }
-export function applyForumMetadata(state, id, metadata) {
+export function applyForumMetadata(state, id, metadata, { onWatchedRelease, now = Date.now() } = {}) {
   const game = state.games.find(item => item.id === id);
   if (!game) throw new Error('This game is no longer in your library.');
+  const before = sameThread(game, metadata) ? game.latestVersion : '';
+  const change = versionRelation(before, metadata.latestVersion);
+  if (state.games.some(item => item.id !== id && sameThread(item.alternateThread, metadata))) throw new Error('That thread is an alternate link on another game.');
   const duplicate = state.games.find(item => item.id !== id && item.origin === metadata.origin && item.threadId === metadata.threadId);
   if (duplicate?.installation && duplicate.installation.root !== game.installation?.root) throw new Error('That thread already belongs to another installed game. Remove the duplicate library entry or choose another thread first.');
   if (game.origin !== metadata.origin || String(game.threadId) !== String(metadata.threadId)) { delete game.lastFeedFingerprint; delete game.versionVerifiedAt; }
+  if (game.alternateThread?.origin === metadata.origin) {
+    game.alternateThread = game.threadUrl && game.origin !== metadata.origin
+      ? { origin: game.origin, threadId: game.threadId, threadUrl: game.threadUrl } : null;
+  }
   if (duplicate) {
     for (const job of state.downloads) if (job.gameId === duplicate.id) job.gameId = id;
     state.games = state.games.filter(item => item.id !== duplicate.id);
     if (!game.cover && duplicate.cover) game.cover = duplicate.cover;
   }
-  for (const key of ['origin', 'threadId', 'threadUrl', 'title', 'latestVersion', 'description', 'creator', 'tags', 'checkedAt', 'cover', 'coverStatus', 'coverError', 'metadataParserVersion']) {
-    if (metadata[key] != null && (key !== 'cover' || metadata.cover)) game[key] = metadata[key];
+  for (const key of ['origin', 'threadId', 'threadUrl', 'title', 'latestVersion', 'description', 'creator', 'tags', 'checkedAt', 'metadataParserVersion']) {
+    if (metadata[key] != null) game[key] = metadata[key];
+  }
+  if (!game.coverPinned) {
+    if (metadata.cover) {
+      game.cover = metadata.cover;
+      game.coverImageId = metadata.coverImageId || '';
+    }
+    for (const key of ['coverStatus', 'coverError']) if (metadata[key] != null) game[key] = metadata[key];
+  }
+  const detected = recordForumRelease(game, metadata, now);
+  const release = detected || { origin: metadata.origin, threadId: metadata.threadId, version: metadata.latestVersion };
+  if (onWatchedRelease && game.watching && (change === 'newer' || change === 'different') && !updateSkipped(game) && !previouslyNotified(game, release)) {
+    rememberWatchedRelease(game, release, now);
+    onWatchedRelease({ gameId: game.id, ...release });
   }
   if (metadata.engine && metadata.engine !== 'custom') game.engine = metadata.engine;
   if (versionKnown(metadata.latestVersion)) game.versionVerifiedAt = metadata.checkedAt || Date.now();

@@ -84,7 +84,7 @@ export async function inspectInstallation(root, expectedEngine = 'custom') {
 export function externalCandidates(engine, metadata, { home = os.homedir(), platform = process.platform, env = process.env } = {}) {
   const { identity, company, product } = metadata;
   // Values originate from untrusted game metadata; constrain them before resolving paths.
-  const simple = value => value && !/[\\/]|\.\./.test(value) && !path.isAbsolute(value);
+  const simple = value => value && value !== '.' && !/[\\/]|\.\./.test(value) && !path.isAbsolute(value);
   const roaming = env.APPDATA || path.join(home, 'AppData', 'Roaming');
   const local = env.LOCALAPPDATA || path.join(home, 'AppData', 'Local');
   if (engine === 'renpy' && simple(identity)) return [path.join(platform === 'win32' ? path.join(roaming, 'RenPy') : platform === 'darwin' ? path.join(home, 'Library', 'RenPy') : path.join(home, '.renpy'), identity)];

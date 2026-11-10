@@ -32,6 +32,25 @@
     <footer class="statusbar"><button id="scan-status" data-action="check-updates"><span data-icon="refresh"></span><span>Not checked yet</span></button><span id="folder-status">Choose a games folder to get started</span><span id="platform-status">Desktop</span></footer>
   </div>
   <dialog id="modal"><form id="modal-form" method="dialog"><div id="modal-content"></div></form></dialog>
+  <dialog id="gallery-viewer" aria-labelledby="gallery-viewer-title">
+    <div class="gallery-viewer-layout">
+      <header class="gallery-viewer-header">
+        <h2 id="gallery-viewer-title">Thread photos</h2>
+        <p class="gallery-viewer-status" role="status" aria-atomic="true"></p>
+        <button type="button" class="icon-button viewer-close" aria-label="Close photo viewer" autofocus data-icon="close"></button>
+      </header>
+      <div class="gallery-stage">
+        <img class="viewer-photo gallery-image" alt="" draggable="false">
+        <button type="button" class="icon-button viewer-prev" aria-label="Previous photo" data-icon="back"></button>
+        <button type="button" class="icon-button viewer-next" aria-label="Next photo" data-icon="forward"></button>
+      </div>
+      <div class="gallery-strip" role="group" aria-label="Photo thumbnails">
+        <div class="gallery-thumbnails">
+          <button type="button" class="button viewer-more" hidden>Load more photos</button>
+        </div>
+      </div>
+    </div>
+  </dialog>
   <div id="toast" role="status" aria-live="polite"></div>
   <script type="module" src="./renderer.mjs"></script>
 </body>

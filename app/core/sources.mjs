@@ -20,6 +20,10 @@ export function sourceById(settings, id) {
   if (!source) throw new Error('Choose F95 or LewdCorner as the source.');
   return source;
 }
+export function gameSearchSource(settings, game) {
+  const sources = configuredSources(settings);
+  return sources.find(source => source.origin === game.origin) || sources.find(source => source.id === sourceId(settings.site));
+}
 export function sourceForUrl(settings, value) {
   let origin; try { origin = new URL(value).origin; } catch { throw new Error('Enter a complete F95 or LewdCorner thread URL.'); }
   const source = configuredSources(settings).find(source => source.origin === origin);
@@ -29,6 +33,12 @@ export function sourceForUrl(settings, value) {
 export function sourceThreadReference(settings, value) {
   const source = sourceForUrl(settings, value);
   return threadReference(value, source.origin);
+}
+export function sameThread(a, b) {
+  return Boolean(a?.threadId && b?.threadId && a.origin === b.origin && String(a.threadId) === String(b.threadId));
+}
+export function gameMatchesThread(game, ref) {
+  return sameThread(game, ref) || sameThread(game.alternateThread, ref);
 }
 export function sourceLabel(settings, game) {
   if (!game.threadId || !game.threadUrl) return 'Local';

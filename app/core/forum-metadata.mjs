@@ -1,8 +1,19 @@
+import { createHash } from 'node:crypto';
 import { parseLatest, parseLatestHtml, parseThread, threadReference, imageReference } from './site.mjs';
 import { normalizedTitle } from './model.mjs';
+import { archiveTitle } from './archive-names.mjs';
 
 function searchText(value) {
-  return normalizedTitle(String(value || '').replace(/([\p{Ll}\d])([\p{Lu}])/gu, '$1 $2')).normalize('NFKD').replace(/\p{M}/gu, '');
+  const title = String(value || '').trim();
+  if (!title) return '';
+  const name = archiveTitle(title.replace(/\s*\(\d+\)(?=\.[^.]+$)/, ''))
+    .replace(/\.(?:app|exe)$/i, '')
+    .replace(/\[[^\]]*\]|\([^)]*\)/g, ' ')
+    .trim()
+    .replace(/[\s._-]+(?:v(?:ersion)?\.?\s*\d+(?:\.\d+)*|\d+(?:\.\d+)+)(?:[a-z]\d*)?(?:[\s._-]+(?:mac(?:os)?|osx|win(?:dows|32|64)?|linux|pc|x64|x86|arm64|universal|public|compressed))*$/i, '')
+    .replace(/\s*-\s*(?:mac(?:os)?|osx|win(?:dows|32|64)?|linux|pc|x64|x86|arm64|universal)$/i, '');
+  return normalizedTitle(name.replace(/[’']/g, '').replace(/([\p{Ll}\d])([\p{Lu}])/gu, '$1 $2')
+    .normalize('NFKD').replace(/\p{M}/gu, ''));
 }
 function searchWords(value) { return searchText(value).split(' ').filter(word => word && !['a', 'an', 'the'].includes(word)); }
 function matchScore(title, query) {
@@ -14,7 +25,15 @@ function matchScore(title, query) {
   return candidate.includes(words.join(' ')) ? 80 : 60;
 }
 export function searchUrl(site, title, page = 1) {
-  const query = searchWords(title).join(' ').slice(0, 30).trim();
+  return titleSearchUrl(site, fitSearchWords(searchWords(title)), page);
+}
+function fitSearchWords(words) {
+  const phrase = words.join(' ');
+  if (phrase.length <= 30) return phrase;
+  const limit = phrase.lastIndexOf(' ', 30);
+  return phrase.slice(0, limit > 0 ? limit : 30);
+}
+function titleSearchUrl(site, query, page) {
   if (query.length < 2) throw new Error('Enter at least two letters of the game title.');
   if (!site.latestPath) throw new Error('Map this source’s latest-updates endpoint in Settings first.');
   const url = new URL(site.latestPath.replaceAll('{page}', String(page)), site.origin);
@@ -83,9 +102,12 @@ export class ForumMetadata {
     throw new Error('The metadata request redirected too many times.');
   }
   async search(title) {
-    const found = new Map(), seen = new Set();
-    for (let page = 1; page <= 3; page++) {
-      const url = searchUrl(this.site, title, page), response = await this.response(url);
+    const query = fitSearchWords(searchWords(title));
+    const queryWords = query.split(' ');
+    const alternate = queryWords.reduce((longest, word) => word.length > longest.length ? word : longest, '');
+    const found = new Map();
+    const searchPage = async (phrase, page, seen) => {
+      const url = titleSearchUrl(this.site, phrase, page), response = await this.response(url);
       const body = (await bytes(response, 5_000_000)).toString('utf8');
       let rows;
       if (this.site.feedFormat === 'html') rows = await this.htmlRows(body, url);
@@ -95,12 +117,22 @@ export class ForumMetadata {
         if (seen.has(row.threadId)) continue;
         seen.add(row.threadId); newRows++;
         const score = matchScore(row.title, title);
-        if (!score) continue;
+        if (!score || found.get(row.threadId)?.score >= score) continue;
         const ref = threadReference(`/threads/${row.threadId}/`, this.site.origin);
         found.set(row.threadId, { ...ref, title: row.title, latestVersion: row.version, engine: row.engine, creator: row.creator, exact: score === 100, score });
       }
-      if (rows.length < 30 || !newRows) break;
+      return { total: rows.length, newRows };
+    };
+    const seen = new Set();
+    let repeatedPage = false;
+    for (let page = 1; page <= 3; page++) {
+      const { total, newRows } = await searchPage(query, page, seen);
+      repeatedPage = total > 0 && !newRows;
+      if (total < 30 || repeatedPage) break;
     }
+    // The endpoint can require a literal phrase. Try one distinctive word, but
+    // score its results against the full title to keep unrelated rows out.
+    if (!found.size && !repeatedPage && alternate !== query) await searchPage(alternate, 1, new Set());
     return [...found.values()].sort((a, b) => b.score - a.score).slice(0, 60);
   }
   async latestPage(page) {
@@ -131,7 +163,7 @@ export class ForumMetadata {
     try { const rows = await this.latestPage(1); return { status: 'reachable', message: `Website reached · update listing parsed${this.lastListingMode === 'rendered' ? ' after page loaded' : ''} (${rows.length} entries on page 1). Use Check for updates to scan newer entries against the saved checkpoint.`, feedStatus: 'ok', entries: rows.length, listingMode: this.lastListingMode }; }
     catch (error) { return { status: 'reachable', message: `Website reached; update listing needs attention. ${error.message}`, feedStatus: 'error' }; }
   }
-  async thread(url, { cover = true } = {}) {
+  async thread(url, { cover = true, gallery = false } = {}) {
     const ref = threadReference(url, this.site.origin), response = await this.response(ref.threadUrl, true, { 'Cache-Control': 'no-cache' });
     let finalRef = ref;
     if (response.url) {
@@ -139,20 +171,33 @@ export class ForumMetadata {
       if (finalRef.threadId !== ref.threadId) throw new Error('This URL redirects to a different thread. View it in Browse and confirm its correct thread before linking.');
     }
     const metadata = parseThread((await bytes(response, 3_000_000)).toString('utf8'), finalRef.threadUrl, ref.origin);
-    if (!cover) { delete metadata.coverUrl; delete metadata.coverCandidates; return metadata; }
+    if (!cover) {
+      delete metadata.coverUrl; delete metadata.coverCandidates;
+      if (!gallery) delete metadata.imageGroups;
+      return metadata;
+    }
     return this.withCover(metadata);
+  }
+  async photo(url, gallery = false) {
+    const image = await this.response(url, false, { Accept: 'image/avif,image/webp,image/png,image/jpeg,image/gif,*/*;q=0.5', Referer: this.site.origin + '/' });
+    if (!/^image\/(?:png|jpe?g|webp|gif|avif)(?:;|$)/i.test(image.headers.get('content-type') || '')) {
+      await image.body?.cancel();
+      throw new Error('The cover response was not a supported image.');
+    }
+    const data = await bytes(image, 8_000_000);
+    const src = this.decodeCover(data, { gallery });
+    if (!src) throw new Error('The cover image could not be decoded.');
+    return { id: createHash('sha256').update(data).digest('hex'), src };
   }
   async withCover(metadata) {
     metadata = { ...metadata };
     const candidates = [...new Set([...(metadata.coverCandidates || []), metadata.coverUrl].filter(Boolean))].slice(0, 4);
-    delete metadata.coverUrl; delete metadata.coverCandidates;
+    delete metadata.coverUrl; delete metadata.coverCandidates; delete metadata.imageGroups;
     let reason = 'No supported cover image was found in the opening post.';
     for (const coverUrl of candidates) {
       try {
-        const image = await this.response(coverUrl, false, { Accept: 'image/avif,image/webp,image/png,image/jpeg,image/gif,*/*;q=0.5', Referer: this.site.origin + '/' });
-        if (!/^image\/(?:png|jpe?g|webp|gif|avif)(?:;|$)/i.test(image.headers.get('content-type') || '')) { await image.body?.cancel(); throw new Error('The cover response was not a supported image.'); }
-        metadata.cover = this.decodeCover(await bytes(image, 8_000_000));
-        if (!metadata.cover) throw new Error('The cover image could not be decoded.');
+        const photo = await this.photo(coverUrl);
+        metadata.cover = photo.src; metadata.coverImageId = photo.id;
         metadata.coverStatus = 'cached'; metadata.coverError = ''; return metadata;
       } catch (error) {
         const status = /HTTP (\d{3})/.exec(error.message)?.[1];

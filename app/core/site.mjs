@@ -18,6 +18,34 @@ export function imageReference(value, base) {
     return url.href;
   } catch { return ''; }
 }
+function threadImages($, content, url) {
+  const groups = new Map();
+  const attachment = /\.(?:png|jpe?g|gif|webp|avif)(?:[?#]|$)|\/attachments\//i;
+  const imageLink = node => node.is('[data-fancybox], .js-lbImage, .bbImageWrapper') || attachment.test(node.attr('href') || '');
+  const group = element => {
+    if (!groups.has(element)) groups.set(element, []);
+    return groups.get(element);
+  };
+  content.find('.bbImageWrapper, .js-lbImage, img, picture source, a[data-fancybox], a[href]').each((_i, element) => {
+    const node = $(element);
+    if (node.is('a') && !imageLink(node)) return;
+    const anchor = node.closest('a');
+    const parent = (imageLink(anchor) && anchor.get(0)) || node.closest('.bbImageWrapper, picture').get(0) || element;
+    const urls = group(parent);
+    for (const attribute of ['data-src', 'data-url', 'data-original', 'data-lazy-src']) urls.push(node.attr(attribute));
+    const srcset = node.attr('data-srcset') || node.attr('srcset');
+    if (srcset) urls.push(...srcset.split(',').map(value => value.trim().split(/\s+/)[0]).reverse());
+    urls.push(node.attr('src'));
+    if (node.is('a')) urls.push(node.attr('href'));
+  });
+  groups.set(null, [$('meta[property="og:image"]').attr('content')]);
+  const seen = new Set();
+  return [...groups.values()].map(values => [...new Set(values
+    .filter(value => value && !/smilies|avatars|emoji|spacer|placeholder|transparent|loading\.(?:gif|png)|\/logos?\//i.test(value))
+    .map(value => imageReference(value, url)).filter(Boolean))]
+    .filter(value => { if (seen.has(value)) return false; seen.add(value); return true; }).slice(0, 4))
+    .filter(values => values.length).slice(0, 40);
+}
 export function parseThread(html, url, origin) {
   const ref = threadReference(url, origin);
   const $ = cheerio.load(html);
@@ -42,26 +70,17 @@ export function parseThread(html, url, origin) {
   textBody.find('strong, b').each((_i, element) => { if (/^(?:overview|description|developer|creator|version|game version|engine|thread updated|release date|os|language|download|installation|changelog)\s*:/i.test($(element).text().trim())) $(element).before('\n'); });
   const body = textBody.text().replace(/\r/g, '').replace(/[ \t]+\n/g, '\n').slice(0, 100000);
   const fieldVersion = /(?:game\s+)?version\s*:\s*([^\n\r]+)/i.exec(body)?.[1]?.trim();
-  const pictures = [];
-  content.find('.bbImageWrapper, .js-lbImage, img, picture source, a[data-fancybox]').each((_i, element) => {
-    const node = $(element);
-    for (const attribute of ['data-src', 'data-url', 'data-original', 'data-lazy-src']) pictures.push(node.attr(attribute));
-    const srcset = node.attr('data-srcset') || node.attr('srcset');
-    if (srcset) pictures.push(...srcset.split(',').map(value => value.trim().split(/\s+/)[0]).reverse());
-    pictures.push(node.attr('src'));
-    if (node.is('a')) pictures.push(node.attr('href'));
-  });
-  content.find('a[href]').each((_i, element) => { const href = $(element).attr('href'); if (/\.(?:png|jpe?g|gif|webp|avif)(?:[?#]|$)|\/attachments\//i.test(href)) pictures.push(href); });
-  pictures.push($('meta[property="og:image"]').attr('content'));
-  const coverCandidates = [...new Set(pictures.filter(value => value && !/smilies|avatars|emoji|spacer|placeholder|transparent|loading\.(?:gif|png)|\/logos?\//i.test(value)).map(value => imageReference(value, url)).filter(Boolean))].slice(0, 12);
+  const imageGroups = threadImages($, content, url);
+  const coverCandidates = imageGroups.flat().slice(0, 12);
   const creatorField = /(?:developer|creator)\s*:\s*([^\n\r]+)/i.exec(body)?.[1]?.trim().slice(0, 200);
   const creator = creatorField || [...fullTitle.matchAll(/\[([^\]]+)\]/g)].map(match => match[1]).filter(value => !versionFromTitle(`[${value}]`) && detectEngine(value) === 'custom').at(-1) || '';
   const overview = /(?:^|\n)\s*(?:overview|description)\s*:\s*([\s\S]*?)(?=\n\s*(?:thread updated|release date|developer|creator|version|engine|os|language|download(?:s| links)?|installation|changelog|screenshots)\s*:|$)/i.exec(body)?.[1] || body;
+  const changelog = /(?:^|\n)\s*(?:change\s*log|what[’']?s new)\s*:\s*([\s\S]*?)(?=\n\s*(?:download(?:s| links)?|installation|screenshots|overview|description)\s*:|$)/i.exec(body)?.[1]?.trim() || '';
   const engineField = /(?:^|\n)\s*(?:game\s+)?engine\s*:\s*([^\n]+)/i.exec(body)?.[1] || '';
   return { ...ref, title: fullTitle.replace(/\[[^\]]*\]/g, '').trim() || fullTitle,
     latestVersion: versionFromTitle(fullTitle) || fieldVersion?.slice(0, 100) || '',
     engine: detectEngine(tags.join(' ') + ' ' + fullTitle + ' ' + engineField), tags: tags.slice(0, 50),
-    description: overview.replace(/\s+/g, ' ').trim().slice(0, 400), creator, coverUrl: coverCandidates[0] || '', coverCandidates, metadataParserVersion: 2, checkedAt: Date.now() };
+    description: overview.replace(/\s+/g, ' ').trim().slice(0, 400), changelog: changelog.slice(0, 1800), creator, coverUrl: coverCandidates[0] || '', coverCandidates, imageGroups, metadataParserVersion: 2, checkedAt: Date.now() };
 }
 export function parseLatest(payload) {
   const rows = payload?.msg?.data || payload?.data;
