@@ -32,7 +32,13 @@ const icon = name => `<svg viewBox="0 0 24 24" aria-hidden="true">${icons[name] 
 const e = value => String(value ?? '').replace(/[&<>"']/g, char => ({ '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' })[char]);
 const $ = selector => document.querySelector(selector);
 const gameTags = game => Array.isArray(game.tags) ? game.tags : [];
-const libraryStatuses = [['all', 'All games'], ['updates', 'Updates'], ['active', 'In progress'], ['installed', 'Installed'], ['uninstalled', 'Not installed']];
+const libraryStatuses = [['all', 'All games'], ['updates', 'Updates'], ['active', 'In progress'], ['installed', 'Installed'], ['uninstalled', 'Not installed'], ['broken', 'Needs attention']];
+function gameNeedsAttention(game, jobs = []) {
+  if (game.availability?.status && game.availability.status !== 'available') return true;
+  if (game.installation && !canLaunchGame(game)) return true;
+  if (jobs.some(job => downloadGroup(job) === 'attention')) return true;
+  return false;
+}
 const librarySources = [['all', 'All sources'], ['LC', 'LC only'], ['F95', 'F95 only'], ['Local', 'Local only']];
 const librarySorts = [
   ['added-desc', 'Newest added'], ['added-asc', 'Oldest added'],
@@ -124,6 +130,7 @@ function renderLibraryResults() {
     const installed = isInstalled(game);
     if (filter === 'updates' && !(installed && hasUpdate(game))) return false;
     if (filter === 'active' && !jobs.get(game.id)?.some(job => downloadGroup(job) === 'active')) return false;
+    if (filter === 'broken' && !gameNeedsAttention(game, jobs.get(game.id))) return false;
     if ((filter === 'installed' && !installed) || (filter === 'uninstalled' && installed)) return false;
     if (sourceFilter !== 'all' && sourceLabel(state.settings, game) !== sourceFilter) return false;
     if (extraFilters.engine && game.engine !== extraFilters.engine) return false;
@@ -190,7 +197,9 @@ function renderLibrary() {
     button('scan-folder', 'Scan games folder', 'folder') +
     button('refresh-library-details', state.detailScan?.active ? state.detailScan.message : 'Refresh library details', 'refresh', state.detailScan?.active ? 'disabled' : '') +
     button('check-updates', 'Check for updates', 'refresh', state.scan.active ? 'disabled' : '') +
-    button('check-all-updates', 'Check all linked threads', 'search', state.scan.active ? 'disabled' : 'title="Optional full verification of every linked game"');
+    button('check-all-updates', 'Check all linked threads', 'search', state.scan.active ? 'disabled' : 'title="Optional full verification of every linked game"') +
+    button('export-library', 'Export library (.json)', 'download') +
+    button('import-library', 'Import library (.json)', 'plus');
   $('#library-onboarding').innerHTML = state.settings.setupCompleted ? '' : `<div class="onboarding">${icon('folder')}<div><strong>Finish setting up your library.</strong><p>Choose a games folder, download behaviour, and optionally find your existing games.</p></div>${button('setup', 'Set up library', 'arrow')}</div>`;
   renderLibraryResults();
 }
@@ -248,6 +257,7 @@ function renderBrowserState() {
 }
 function downloadCard(job) {
   const game = currentGame(job.gameId), active = ['downloading','queued','retrying'].includes(job.status), id = `data-id="${e(job.id)}"`, installed = job.status === 'installed';
+  const password = job.thread?.archivePassword || game?.archivePassword || '';
   let actions = '';
   if (active) actions += button('cancel-download','Cancel',null,id);
   if (['failed','cancelled'].includes(job.status)) actions += button('retry-download','Return to thread','globe',id);
@@ -256,13 +266,14 @@ function downloadCard(job) {
     const label = finish ? (job.extractedPath ? 'Resume install' : isInstalled(game) ? 'Finish update' : 'Finish installation') : isInstalled(game) ? 'Update game' : 'Install game';
     actions += button('install-zip',label,'download',id,true)+button('extract-external','Open extraction app','arrow',id+' title="Open the archive again in your extraction app"')+button('select-extracted','Select extracted folder','folder',id);
   }
+  if (password) actions += button('copy-password', 'Copy password', 'lock', `data-password="${e(password)}" title="Copy archive password (${e(password)})"`);
   if (!job.archiveRemoved && !job.partialRemoved) actions += button('reveal-download',runtime.platform==='darwin'?'Show in Finder':'Show in Explorer','folder',id);
   if (!game && canInstallArchive(job)) actions = button('assign-download','Add to library','plus',id,true)+actions;
   if (game && job.thread?.threadUrl && canInstallArchive(job)) actions += button('assign-download','Change game','library',id+' title="Use this download to update a different existing library game"');
   if (game?.threadUrl) actions += button('download-thread','Open thread','globe',id);
   if (installed && !job.archiveRemoved) actions += button('cleanup-download','Retry archive cleanup','refresh',id);
   if (!active && job.status!=='installing') actions += button('clear-download','Remove from list','close',id+' title="Keep files on disk; remove this download record"');
-  return `<article class="download-card" data-download-row="${e(job.id)}" tabindex="-1"><div class="download-top"><div class="download-icon">${icon(installed?'check':'file')}</div><div class="download-info"><strong>${e(job.filename)}</strong><p>${e(game ? displayGameTitle(game) : 'Add as a new game or choose an existing library game')} ${job.version ? ' · '+e(job.version):''} · ${bytes(job.received)}${job.total?' / '+bytes(job.total):''}</p></div></div>${transferStatus(job, true)}${job.phase && job.status !== 'installing'?`<p class="helper">${e(job.phase)}</p>`:''}${job.partialRemoved?'<p class="helper">Incomplete file removed. Choose a new download from the game thread.</p>':''}${job.partialCleanupError?`<p class="download-error">${e(job.partialCleanupError)}</p>`:''}${job.archiveRemoved?'<p class="helper">Compressed archive removed after confirmed installation.</p>':''}${job.metadataWarning?`<p class="helper">${e(job.metadataWarning)}</p>`:''}${job.error?`<p class="download-error">${e(job.error)}</p>`:''}<div class="download-actions">${actions}</div></article>`;
+  return `<article class="download-card" data-download-row="${e(job.id)}" tabindex="-1"><div class="download-top"><div class="download-icon">${icon(installed?'check':'file')}</div><div class="download-info"><strong>${e(job.filename)}</strong><p>${e(game ? displayGameTitle(game) : 'Add as a new game or choose an existing library game')} ${job.version ? ' · '+e(job.version):''} · ${bytes(job.received)}${job.total?' / '+bytes(job.total):''}</p></div></div>${transferStatus(job, true)}${password?`<p class="helper">${icon('lock')} Archive password: <code>${e(password)}</code></p>`:''}${job.phase && job.status !== 'installing'?`<p class="helper">${e(job.phase)}</p>`:''}${job.partialRemoved?'<p class="helper">Incomplete file removed. Choose a new download from the game thread.</p>':''}${job.partialCleanupError?`<p class="download-error">${e(job.partialCleanupError)}</p>`:''}${job.archiveRemoved?'<p class="helper">Compressed archive removed after confirmed installation.</p>':''}${job.metadataWarning?`<p class="helper">${e(job.metadataWarning)}</p>`:''}${job.error?`<p class="download-error">${e(job.error)}</p>`:''}<div class="download-actions">${actions}</div></article>`;
 }
 function renderDownloads() {
   const clearable = state.downloads.some(job => ['downloaded', 'installed'].includes(job.status));
@@ -342,7 +353,7 @@ function renderSettings() {
     ${(state.settings.extraGamesRoots || []).map(root => `<div class="path-picker">${icon('folder')}<span class="path-value">${e(root)}</span>${button('remove-games-root','Remove',null,`data-root="${e(root)}"`)}</div>`).join('')}
     <div class="download-actions">${button('add-games-root','Add games folder','plus')}</div><label class="field"><span>External extraction application</span></label><div class="path-picker">${icon('file')}<span class="path-value">${e(state.settings.extractor||'Use the system’s default app for external extraction')}</span>${state.settings.extractor?button('reset-extractor','Use default',null):''}${button('choose-extractor','Choose app',null)}</div><p class="helper">Install handles ordinary ZIP releases automatically. Use this app for other formats, passwords or multipart archives; select its output if it cannot report completion.</p><div class="download-actions">${button('setup','Run setup again','settings')}${button('scan-folder','Find existing games','search')}${button('open-drive-storage','Storage by drive','folder')}</div></section>
     <form id="settings-form" class="panel"><h2>Forum & preferences</h2><p>Games check their own F95 or LewdCorner source. Browsing another source does not reassign your library.</p><label class="field"><span>Completed downloads</span><select name="downloadMode"><option value="download-only" ${state.settings.downloadMode==='download-only'?'selected':''}>Download only — install manually</option><option value="assisted" ${state.settings.downloadMode==='assisted'?'selected':''}>Offer to install/update after downloading</option></select><small>You choose the provider and start each download. Installation transfers identified saves and preferences.</small></label><div class="field-row"><label class="field"><span>Check while the app is open</span><select name="intervalMinutes">${[5,15,30,60,120].map(n=>`<option value="${n}" ${state.settings.intervalMinutes===n?'selected':''}>Every ${n} minutes</option>`).join('')}</select></label><label class="field"><span>Old versions after an update</span><select name="retention">${[['keep','Keep all old versions'],['previous','Keep the previous version'],['delete','Permanently delete old versions']].map(([id,label])=>`<option value="${id}" ${state.settings.retention===id?'selected':''}>${label}</option>`).join('')}</select></label></div><label class="field"><span>Appearance</span><select name="theme"><option value="dark" ${state.settings.theme==='dark'?'selected':''}>Dark forum style</option><option value="light" ${state.settings.theme==='light'?'selected':''}>Light forum style</option></select></label><p class="helper">Archives are automatically deleted after confirmed installation. Download-only and unconfirmed archives remain available.</p><div class="form-actions"><button class="button primary" type="submit">Save preferences</button></div></form>
-    ${sourceSettings()}<section class="panel"><h2>Account & support</h2><p>Sign in on the actual website in Browse. The app keeps your forum session separate from game save data.</p><div class="download-actions">${button('browser-home','Open forum login','globe')}${button('logout','Clear current login',null)}${button('diagnostics-copy','Copy diagnostics','file')}${button('diagnostics-save','Save diagnostics.txt','download')}</div><table class="support-table"><tr><td>Application</td><td>AfterShelf ${e(displayVersion(runtime.version))}</td></tr><tr><td>This device</td><td>${e(runtime.platform)} · ${e(runtime.arch)}</td></tr><tr><td>Engine rules</td><td>Alpha · game validation in progress</td></tr></table></section></div>`;
+    ${sourceSettings()}<section class="panel"><h2>Account & support</h2><p>Sign in on the actual website in Browse. The app keeps your forum session separate from game save data.</p><div class="download-actions">${button('browser-home','Open forum login','globe')}${button('logout','Clear current login',null)}${button('export-library','Export library (.json)','download')}${button('import-library','Import library (.json)','plus')}${button('diagnostics-copy','Copy diagnostics','file')}${button('diagnostics-save','Save diagnostics.txt','download')}</div><table class="support-table"><tr><td>Application</td><td>AfterShelf ${e(displayVersion(runtime.version))}</td></tr><tr><td>This device</td><td>${e(runtime.platform)} · ${e(runtime.arch)}</td></tr><tr><td>Engine rules</td><td>Alpha · game validation in progress</td></tr></table></section></div>`;
 }
 function renderActivity() {
   content.innerHTML = pageActions(button('diagnostics-copy','Copy diagnostics','file')+button('diagnostics-save','Save .txt','download'))+
@@ -450,7 +461,7 @@ function releaseTimeline(game, attrs) {
     `<li>${time(session.at)} · ${e(session.version || 'Unknown version')} · ${playDuration(session.duration)}</li>`).join('');
   return `<div class="download-actions">${watch}</div>
     ${releases || '<p>Newly checked releases will appear here.</p>'}
-    ${sessions ? `<h3>Recent HTML play sessions</h3><ul class="save-locations">${sessions}</ul>` : ''}`;
+    ${sessions ? `<h3>Recent play sessions</h3><ul class="save-locations">${sessions}</ul>` : ''}`;
 }
 function renderDriveStorage() {
   const usage = (driveStorage || []).map(drive => {
@@ -487,11 +498,13 @@ function detailDownloads(game) {
   const jobs = state.downloads.filter(job => job.gameId === game.id);
   const rows = jobs.map(job => {
     const attrs = `data-id="${e(job.id)}"`;
+    const password = job.thread?.archivePassword || game.archivePassword || '';
     const label = job.status === 'awaiting-folder' ? 'Finish installation' : isInstalled(game) ? 'Update game' : 'Install game';
     const install = canInstallArchive(job) ? button('install-zip', label, 'download', attrs, true) : '';
+    const copyPass = password ? button('copy-password', 'Copy password', 'lock', `data-password="${e(password)}" title="Copy archive password (${e(password)})"`) : '';
     const reveal = !job.archiveRemoved && !job.partialRemoved ? button('reveal-download', 'Show file', 'folder', attrs) : '';
     const viewJob = downloadGroup(job) === 'active' ? button('show-game-download', 'View download', 'download', attrs) : '';
-    return `<div class="detail-row"><div><strong>${e(job.filename)}</strong><small>${e(job.version || '')}</small>${transferStatus(job,true)}</div><div class="download-actions">${install}${viewJob}${reveal}</div></div>`;
+    return `<div class="detail-row"><div><strong>${e(job.filename)}</strong><small>${e(job.version || '')}${password ? ' · Password: ' + e(password) : ''}</small>${transferStatus(job,true)}</div><div class="download-actions">${install}${copyPass}${viewJob}${reveal}</div></div>`;
   }).join('');
   return (rows || '<p>No downloads linked to this game.</p>') + button('attach-archive', 'Use downloaded archive', 'file', `data-id="${e(game.id)}"`);
 }
@@ -502,14 +515,17 @@ function detailOverview(game, attrs) {
   const alternate = game.alternateThread;
   const sourceActions = game.threadUrl ? `<div class="detail-row"><div><strong>Forum links</strong><small>${e(sourceLabel(state.settings,game))} checks for updates${alternate ? ' · ' + e(sourceLabel(state.settings,alternate)) + ' alternate' : ''}</small></div>
     <div class="download-actions">${alternate ? button('open-alternate-thread','Open alternate','globe',attrs) : ''}${button('edit-alternate-thread','Manage links',null,attrs)}</div></div>` : '';
+  const passwordRow = game.archivePassword ? `<div class="detail-row"><div><strong>Archive password</strong><small><code>${e(game.archivePassword)}</code></small></div>
+    <div class="download-actions">${button('copy-password', 'Copy password', 'lock', `data-password="${e(game.archivePassword)}"`)}</div></div>` : '';
   const tags = [...new Set(gameTags(game))].map(tag => `<button type="button" class="badge detail-tag" data-action="filter-game-tag" data-tag="${e(tag)}">${e(tag)}</button>`).join('');
   return `<div class="detail-versions">
     <div><small>Installed version</small><strong>${isInstalled(game) ? e(game.installedVersion || 'Unknown') : 'Not installed'}</strong></div>
     <div><small>Forum version</small><strong>${e(game.latestVersion || (game.threadId ? 'Unknown' : 'No linked thread'))}</strong></div>
     <div><small>${game.lastPlayedAt ? 'Last played' : 'Last launched'}</small><strong>${time(game.lastPlayedAt || game.lastLaunchedAt)}</strong></div>
-    ${game.playtimeMs ? `<div><small>Tracked HTML playtime</small><strong>${playDuration(game.playtimeMs)}</strong></div>` : ''}
+    ${game.playtimeMs ? `<div><small>Tracked playtime</small><strong>${playDuration(game.playtimeMs)}</strong></div>` : ''}
     </div>${libraryPrivacy !== 'titles' && game.description ? `<p class="game-description">${e(game.description)}</p>` : ''}
     ${sourceActions}
+    ${passwordRow}
     ${tags ? `<div class="detail-tags">${tags}</div>` : ''}
     ${libraryPrivacy !== 'titles' && game.notes ? `<h3>Personal notes</h3><p class="detail-notes">${e(game.notes)}</p>` : ''}
     ${game.installationCheck?.message ? `<p class="helper">${e(game.installationCheck.message)} ${e(game.installationCheck.metadataWarning || '')}</p>` : ''}
@@ -526,7 +542,7 @@ function detailSaves(inventory, attrs) {
   const locations = inventory.locations.map(({ directory, scope }) => `<li><strong>${e(scope)}</strong> · ${e(directory)}</li>`).join('');
   const files = inventory.files.map(save => {
     const file = attrs + ` data-file="${e(save.file)}"`;
-    const inspect = save.editor ? button('inspect-save', save.editor === 'renpy' ? 'View slot' : 'Edit a copy', null, file) : '';
+    const inspect = save.editor ? button('inspect-save', 'Edit a copy', null, file) : '';
     return `<div class="detail-row"><div><strong>${e(save.name)}</strong><small>${e(save.scope)} · ${time(save.modified)} · ${bytes(save.size)}</small></div>
       <div class="download-actions">${inspect}${button('reveal-save', 'Show file', 'folder', file)}${button('export-save-copy', 'Export copy', 'download', file)}</div></div>`;
   }).join('');
@@ -538,9 +554,10 @@ function detailStorage(game, sizes, attrs) {
   const installRow = (install, current) => {
     const version = attrs + ` data-root="${e(install.root)}"`;
     const show = current ? button('reveal-game', 'Show installation', 'folder', attrs) : button('reveal-version', 'Show folder', 'folder', version);
+    const rollback = current ? '' : button('rollback-version', 'Roll back', 'refresh', version + ' title="Make this version active and transfer saves"');
     const remove = current ? '' : button('remove-version', 'Delete version', 'trash', version);
     return `<div class="detail-row"><div><strong>${current ? 'Current installation' : 'Previous version'}${install.version ? ' · ' + e(install.version) : ''}</strong>
-      <small>${sizeLabel(sizes.versions.find(item => item.root === install.root))} · ${e(install.container || install.root)}</small></div><div class="download-actions">${show}${remove}</div></div>`;
+      <small>${sizeLabel(sizes.versions.find(item => item.root === install.root))} · ${e(install.container || install.root)}</small></div><div class="download-actions">${rollback}${show}${remove}</div></div>`;
   };
   const archives = sizes.archives.map(item => {
     const job = state.downloads.find(job => job.id === item.id);
@@ -678,19 +695,21 @@ function editAlternateThread(id) {
 }
 async function saveEditor(id, file, details, draft = {}) {
   const back = button('detail-tab', 'Back to saves', null, `data-id="${e(id)}" data-tab-name="saves"`);
-  if (details.slot) {
-    const { label, version, engineVersion } = details.slot;
-    return modal(`<h2>Ren’Py save slot</h2><p>${e(label || 'Unnamed save')}${version ? ' · Game ' + e(version) : ''}${engineVersion ? ' · Ren’Py ' + e(engineVersion) : ''}</p>
-      <p class="helper">Only the slot metadata is displayed.</p><div class="form-actions">${back}</div>`, null);
+  const fields = details.fields || [];
+  const slotInfo = details.slot
+    ? `<p class="helper">${e(details.slot.label || 'Unnamed save')}${details.slot.version ? ' · Game ' + e(details.slot.version) : ''}${details.slot.engineVersion ? ' · Ren’Py ' + e(details.slot.engineVersion) : ''}</p>`
+    : '';
+  if (details.slot && !fields.length) {
+    return modal(`<h2>Ren’Py save slot</h2>${slotInfo}
+      <p class="helper">No editable primitive store variables were found in this save.</p><div class="form-actions">${back}</div>`, null);
   }
-  const fields = details.fields;
   const rows = fields.map(field => {
     const value = draft[field.id] ?? field.value;
     const control = typeof value === 'boolean' ? `<select name="${e(field.id)}">${selectOptions([['true', 'True'], ['false', 'False']], String(value))}</select>`
       : `<input name="${e(field.id)}" type="${typeof value === 'number' ? 'number' : 'text'}" value="${e(value)}" ${field.id === 'gold' ? 'required min="0" max="99999999"' : typeof value === 'number' ? 'required step="any"' : 'maxlength="500"'}>`;
     return `<label class="field" data-save-field="${e(field.label.toLowerCase())}"><span>${e(field.label)}</span>${control}</label>`;
   }).join('');
-  return modal(`<h2>Edit a save copy</h2><p>Changes are exported as a separate file. The game may need an existing slot to load it.</p>
+  return modal(`<h2>Edit a save copy</h2>${slotInfo}<p>Changes are exported as a separate file. The game may need an existing slot to load it.</p>
     <label class="field"><span>Find a field</span><input type="search" id="save-field-search"></label>
     <div class="save-editor-fields">${rows}</div><div class="form-actions">${back}<button class="button primary" type="submit">Review changes</button></div>`, async form => {
     const changes = fields.flatMap(field => {
@@ -801,6 +820,30 @@ document.addEventListener('click',event=>{
     if(action==='reveal-version'||action==='remove-version'){
       const result=await api(action,{id,root:target.dataset.root});
       if(action==='remove-version'&&result){await gameDetails(id,'storage');toast('Previous version removed.');}return;
+    }
+    if(action==='rollback-version'){
+      const result=await api(action,{id,root:target.dataset.root});
+      await gameDetails(id,'storage');
+      toast(`Rolled back to ${result.version}${result.copiedSaves?` (${result.copiedSaves} save files transferred)`:''}.`);
+      return;
+    }
+    if(action==='copy-password'){
+      await api('copy-password', target.dataset.password);
+      toast('Archive password copied to clipboard.');
+      return;
+    }
+    if(action==='export-library'){
+      const result = await api('export-library');
+      if (result?.exported) toast(`Exported ${result.count} library games.`);
+      return;
+    }
+    if(action==='import-library'){
+      const result = await api('import-library');
+      if (result?.imported) {
+        if (page === 'library') renderLibrary();
+        toast(`Imported library file (${result.added} added, ${result.updated} updated).`);
+      }
+      return;
     }
     if(action==='save-library-preset'){
       const filters=structuredClone({filter,sourceFilter,librarySort,search,extraFilters});

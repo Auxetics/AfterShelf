@@ -1,8 +1,30 @@
 import { httpUrl, threadReference, popupAllowed, hostMatches, parseThread } from './core/site.mjs';
-import { gameKey } from './core/model.mjs';
+import { gameKey, hasUpdate } from './core/model.mjs';
 import { sourceForUrl, sourceById, sourceId as siteId } from './core/sources.mjs';
 import { remotePreferences } from './core/remote-preferences.mjs';
 import { readRenderedListing } from './core/rendered-listing.mjs';
+
+function overlayGamesForOrigin(games, origin) {
+  const entries = {};
+  for (const game of games || []) {
+    const matchesPrimary = game.origin === origin && game.threadId;
+    const matchesAlt = game.alternateThread?.origin === origin && game.alternateThread?.threadId;
+    const threadId = matchesPrimary ? String(game.threadId) : matchesAlt ? String(game.alternateThread.threadId) : '';
+    if (!threadId) continue;
+    const installed = Boolean(game.installation?.root);
+    const updateReady = installed && hasUpdate(game);
+    const ver = game.installedVersion || game.latestVersion || '';
+    entries[threadId] = {
+      tone: updateReady ? 'warn' : installed ? 'good' : 'info',
+      label: updateReady
+        ? `Update available${game.latestVersion ? ` · ${game.latestVersion}` : ''}`
+        : installed
+          ? `Installed${ver ? ` · ${ver}` : ''}`
+          : 'In Library'
+    };
+  }
+  return entries;
+}
 
 export class ForumBrowser {
   constructor(window, store, notify, onDownload, { WebContentsView, session, BrowserWindow }) {
@@ -29,7 +51,7 @@ export class ForumBrowser {
       const wc = view.webContents;
       this.views.set(wc.id, tab);
       wc.on('did-start-loading', () => { tab.loading = true; this.publish(); });
-      wc.on('did-stop-loading', () => { tab.loading = false; this.publish(); });
+      wc.on('did-stop-loading', () => { tab.loading = false; this.publish(); this.syncTabOverlay(tab); });
       const navigated = (_event, next) => {
         tab.url = next; tab.error = '';
         try {
@@ -40,9 +62,11 @@ export class ForumBrowser {
         }
         catch { try { const destination = new URL(next), site = sourceForUrl(this.store.data.settings, next); tab.sourceId = site.id; if (!destination.pathname.startsWith('/dl/')) { tab.gameId = null; tab.thread = null; } } catch {} }
         this.publish();
+        this.syncTabOverlay(tab);
       };
       wc.on('did-navigate', navigated); wc.on('did-navigate-in-page', navigated);
       wc.on('dom-ready', () => {
+        this.syncTabOverlay(tab);
         // Cache metadata while the user is on the thread. Provider pages and
         // popup tabs carry this context without refetching the forum later.
         const context = tab.thread, url = wc.getURL();
@@ -144,6 +168,89 @@ export class ForumBrowser {
     const isSearch = new URL(url, site.origin).searchParams.has('search');
     return readRenderedListing({ BrowserWindow: this.BrowserWindow, session: this.session, url, origin: site.origin, timeout: isSearch ? 6000 : 15000,
       onCreated: contents => { id = contents.id; this.metadataContents.add(id); }, onDisposed: () => this.metadataContents.delete(id) });
+  }
+  syncOverlays() {
+    for (const tab of this.views.values()) this.syncTabOverlay(tab);
+  }
+  syncTabOverlay(tab) {
+    const wc = tab?.view?.webContents;
+    if (!wc || wc.isDestroyed?.()) return;
+    let site;
+    try { site = sourceForUrl(this.store.data.settings, wc.getURL() || tab.url); } catch { return; }
+    const entries = overlayGamesForOrigin(this.store.data.games, site.origin);
+    const script = `(() => {
+      const entries = ${JSON.stringify(entries)};
+      if (!document.getElementById('aftershelf-overlay-style')) {
+        const style = document.createElement('style');
+        style.id = 'aftershelf-overlay-style';
+        style.textContent = \`
+          .aftershelf-badge {
+            display: inline-flex; align-items: center; gap: 5px;
+            margin: 0 6px; padding: 2px 8px; border-radius: 5px;
+            font: 700 11px/1.3 -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+            letter-spacing: 0.01em; vertical-align: middle; z-index: 25;
+            box-shadow: 0 2px 6px rgba(0,0,0,0.38); pointer-events: none;
+          }
+          .aftershelf-badge--good { background: #133b2b; color: #7ef0b8; border: 1px solid #257353; }
+          .aftershelf-badge--warn { background: #452c10; color: #ffd07a; border: 1px solid #8c591d; }
+          .aftershelf-badge--info { background: #1b283d; color: #9fc2ff; border: 1px solid #35527d; }
+          .resource-tile_thumb .aftershelf-badge, .game-card .aftershelf-badge {
+            position: absolute; left: 8px; bottom: 8px; margin: 0;
+          }
+        \`;
+        (document.head || document.documentElement).appendChild(style);
+      }
+      const apply = () => {
+        for (const el of document.querySelectorAll('.aftershelf-badge')) el.remove();
+        const urlMatch = /\\/threads\\/(?:[^/?#]*\\.)?(\\d+)(?:\\/|$)/i.exec(location.pathname);
+        if (urlMatch && entries[urlMatch[1]]) {
+          const h1 = document.querySelector('.p-title-value');
+          if (h1) {
+            const b = document.createElement('span');
+            b.className = 'aftershelf-badge aftershelf-badge--' + entries[urlMatch[1]].tone;
+            b.textContent = entries[urlMatch[1]].label;
+            h1.appendChild(b);
+          }
+        }
+        const seenContainers = new WeakSet();
+        for (const a of document.querySelectorAll('a[href*="/threads/"]')) {
+          if (a.closest('nav, header, footer, .message-body, .p-breadcrumbs, .p-nav, .offCanvasMenu')) continue;
+          const m = /\\/threads\\/(?:[^/?#]*\\.)?(\\d+)(?:\\/|$)/i.exec(a.getAttribute('href') || '');
+          if (!m || !entries[m[1]]) continue;
+          const info = entries[m[1]];
+          const tileThumb = a.closest('.resource-tile')?.querySelector('.resource-tile_thumb') || a.closest('.game-card')?.querySelector('.game-card-thumb, .thumb');
+          if (tileThumb) {
+            if (seenContainers.has(tileThumb)) continue;
+            seenContainers.add(tileThumb);
+            if (getComputedStyle(tileThumb).position === 'static') tileThumb.style.position = 'relative';
+            const b = document.createElement('span');
+            b.className = 'aftershelf-badge aftershelf-badge--' + info.tone;
+            b.textContent = info.label;
+            tileThumb.appendChild(b);
+            continue;
+          }
+          const titleContainer = a.closest('.structItem-title, .resource-tile_title, .contentRow-title, h3, h4');
+          if (titleContainer && !seenContainers.has(titleContainer)) {
+            seenContainers.add(titleContainer);
+            const b = document.createElement('span');
+            b.className = 'aftershelf-badge aftershelf-badge--' + info.tone;
+            b.textContent = info.label;
+            titleContainer.appendChild(b);
+          }
+        }
+      };
+      window.__aftershelfApplyBadges = apply;
+      apply();
+      if (!window.__aftershelfObserver && document.body) {
+        let timer = null;
+        window.__aftershelfObserver = new MutationObserver(() => {
+          if (timer) return;
+          timer = setTimeout(() => { timer = null; if (window.__aftershelfApplyBadges) window.__aftershelfApplyBadges(); }, 350);
+        });
+        window.__aftershelfObserver.observe(document.body, { childList: true, subtree: true });
+      }
+    })()`;
+    void wc.executeJavaScript(script, false).catch(() => {});
   }
   async logout(sourceId = siteId(this.store.data.settings.site)) { const source = sourceById(this.store.data.settings, sourceId); await this.session.clearStorageData({ origin: source.origin, storages: ['cookies', 'localstorage', 'indexdb', 'serviceworkers', 'cachestorage'] }); for (const [id, tab] of [...this.views]) if (tab.sourceId === sourceId) this.close(id); }
   destroy() { for (const id of [...this.views.keys()]) this.close(id); }

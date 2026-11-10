@@ -67,7 +67,7 @@ export function applyForumMetadata(state, id, metadata, { onWatchedRelease, now 
     state.games = state.games.filter(item => item.id !== duplicate.id);
     if (!game.cover && duplicate.cover) game.cover = duplicate.cover;
   }
-  for (const key of ['origin', 'threadId', 'threadUrl', 'title', 'latestVersion', 'description', 'creator', 'tags', 'checkedAt', 'metadataParserVersion']) {
+  for (const key of ['origin', 'threadId', 'threadUrl', 'title', 'latestVersion', 'description', 'creator', 'archivePassword', 'tags', 'checkedAt', 'metadataParserVersion']) {
     if (metadata[key] != null) game[key] = metadata[key];
   }
   if (!game.coverPinned) {

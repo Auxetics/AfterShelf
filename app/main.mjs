@@ -28,7 +28,8 @@ import { checkAllSourceUpdates } from './core/update-checker.mjs';
 import { APP_NAME, profileDirectory, syncDockBadge } from './core/desktop.mjs';
 import { configuredSources, sourceById, sourceForUrl, sourceThreadReference, sourceId, updateSourceSettings, checkSourceStatus, sameThread, gameMatchesThread, gameSearchSource } from './core/sources.mjs';
 import { AppUpdater, restartBlockReason } from './core/app-updater.mjs';
-import { listGameSaves, readRenpySlot, readRpgSave, editRpgSave, labelRpgFields } from './core/save-tools.mjs';
+import { listGameSaves, readRenpySlot, readRenpySave, editRenpySave, readRpgSave, editRpgSave, labelRpgFields } from './core/save-tools.mjs';
+import { exportLibraryPayload, importLibraryPayload } from './core/library-transfer.mjs';
 import { installationFolder, measureStorage, storageByDrive } from './core/game-storage.mjs';
 import { gamesFolders, gamesFolderFor, containingGamesFolder } from './core/game-folders.mjs';
 import { registerHtmlScheme, htmlGameOpen, launchHtmlGame, closeHtmlGames } from './core/html-games.mjs';
@@ -64,7 +65,7 @@ const currentRuntime = () => ({
   activeLibraryScan: Boolean(libraryScanController),
   appUpdate: appUpdater ? appUpdater.snapshot() : { status: 'idle', version: '', received: 0, total: 0, percent: 0 }
 });
-const notify = () => { syncDockBadge(app, store.data.games); if (window && !window.isDestroyed()) window.webContents.send('library:state', { ...store.snapshot(), runtime: currentRuntime() }); };
+const notify = () => { syncDockBadge(app, store.data.games); browser?.syncOverlays(); if (window && !window.isDestroyed()) window.webContents.send('library:state', { ...store.snapshot(), runtime: currentRuntime() }); };
 const getGame = id => { const game = store.data.games.find(game => game.id === id); if (!game) throw new Error('Game no longer exists in the library.'); return game; };
 const getJob = id => { const job = store.data.downloads.find(job => job.id === id); if (!job) throw new Error('Download no longer exists.'); return job; };
 const updateJob = (id, changes) => store.update(state => { const job = state.downloads.find(item => item.id === id); if (job) Object.assign(job, changes); });
@@ -785,7 +786,8 @@ const actions = {
     const game = getGame(id);
     if (!canLaunchGame(game)) throw new Error(game.availability?.reason || 'Use Locate installed game to choose this game’s launch file first.');
     if (operations.has(id)) throw new Error('Wait for this game’s installation to finish.');
-    if (/\.html?$/i.test(game.installation.launch)) {
+    const launchPath = game.installation.launch;
+    if (/\.html?$/i.test(launchPath)) {
       if (htmlGameOpen(id)) { await launchHtmlGame(game); return; }
       await launchHtmlGame(game, session => {
         void store.update(state => { const target = state.games.find(item => item.id === id); if (target) recordHtmlSession(target, session); })
@@ -793,8 +795,33 @@ const actions = {
       });
     }
     else {
-      const error = await shell.openPath(game.installation.launch);
-      if (error) throw new Error(error);
+      const startedAt = Date.now();
+      const version = game.installedVersion || game.latestVersion || '';
+      const recordNativeExit = () => {
+        const duration = Math.max(0, Math.round((Date.now() - startedAt) / 1000));
+        if (duration < 2) return;
+        void store.update(state => { const target = state.games.find(item => item.id === id); if (target) recordHtmlSession(target, { at: startedAt, duration, version }); })
+          .catch(error => console.error('Play session could not be saved:', error.message));
+      };
+      if (process.platform === 'darwin' && /\.app\/?$/i.test(launchPath)) {
+        const child = spawn('open', ['-W', launchPath], { detached: true, stdio: 'ignore' });
+        child.once('error', () => { void shell.openPath(launchPath); });
+        child.once('exit', recordNativeExit);
+        child.unref();
+      } else if (/\.(?:exe|sh|bat|command|appimage)$/i.test(launchPath) || process.platform === 'linux') {
+        try {
+          const child = spawn(launchPath, [], { cwd: path.dirname(launchPath), detached: true, stdio: 'ignore' });
+          child.once('error', () => { void shell.openPath(launchPath); });
+          child.once('exit', recordNativeExit);
+          child.unref();
+        } catch {
+          const error = await shell.openPath(launchPath);
+          if (error) throw new Error(error);
+        }
+      } else {
+        const error = await shell.openPath(launchPath);
+        if (error) throw new Error(error);
+      }
     }
     await store.update(state => { const target = state.games.find(item => item.id === id); if (target) target.lastLaunchedAt = Date.now(); });
     await store.log('Game launched', game.threadId ? `Thread ${game.threadId}` : 'Local game');
@@ -824,7 +851,10 @@ const actions = {
   'inspect-save': async ({ id, file }) => {
     const root = getGame(id).installation?.root;
     const save = await gameSave(id, file);
-    if (save.editor === 'renpy') return { slot: await readRenpySlot(save.file) };
+    if (save.editor === 'renpy') {
+      const { slot, fields, revision } = await readRenpySave(save.file);
+      return { slot, fields, revision };
+    }
     if (!['mv', 'mz'].includes(save.editor)) throw new Error('This save format does not have an editor.');
     const { fields, revision } = await readRpgSave(save.file, save.editor);
     return { fields: await labelRpgFields(root, file, fields), revision };
@@ -840,10 +870,17 @@ const actions = {
     await gameSave(id, file);
     if (!revision) await fs.copyFile(file, result.filePath, constants.COPYFILE_EXCL);
     else {
-      if (!['mv', 'mz'].includes(save.editor) || path.extname(result.filePath).toLowerCase() !== extension.toLowerCase()) throw new Error('Use the original save file extension for the edited copy.');
-      const data = await readRpgSave(file, save.editor);
-      if (data.revision !== revision) throw new Error('The original save changed. Open it again before exporting.');
-      const output = editRpgSave(data, save.editor, changes);
+      if (!['mv', 'mz', 'renpy'].includes(save.editor) || path.extname(result.filePath).toLowerCase() !== extension.toLowerCase()) throw new Error('Use the original save file extension for the edited copy.');
+      let output;
+      if (save.editor === 'renpy') {
+        const data = await readRenpySave(file);
+        if (data.revision !== revision) throw new Error('The original save changed. Open it again before exporting.');
+        output = editRenpySave(data, changes);
+      } else {
+        const data = await readRpgSave(file, save.editor);
+        if (data.revision !== revision) throw new Error('The original save changed. Open it again before exporting.');
+        output = editRpgSave(data, save.editor, changes);
+      }
       const handle = await fs.open(result.filePath, 'wx', 0o600);
       try { await handle.writeFile(output); }
       catch (error) { await handle.close(); await fs.rm(result.filePath, { force: true }); throw error; }
@@ -865,6 +902,36 @@ const actions = {
     const folder = installationFolder(retainedVersion(getGame(id), root));
     if (!await exists(folder)) throw new Error('The version folder is unavailable.');
     shell.showItemInFolder(folder);
+  },
+  'rollback-version': async ({ id, root }) => {
+    const game = getGame(id), targetVersion = retainedVersion(game, root);
+    if (htmlGameOpen(id) || operations.has(id)) throw new Error('Finish or close this game’s active work first.');
+    if (!await exists(targetVersion.root) || !await exists(targetVersion.launch)) throw new Error('This retained version folder or launch target is no longer on disk.');
+    const controller = new AbortController();
+    operations.set(id, controller);
+    try {
+      let transferred = { copied: 0 };
+      if (game.installation?.root && await exists(game.installation.root)) {
+        const plan = await savePlan(game.installation.root, game.engine, game.saveOverrides);
+        transferred = await transferSaves(plan, targetVersion.root);
+      }
+      await store.update(() => {
+        const current = game.installation;
+        game.previous = [
+          ...(current ? [current] : []),
+          ...game.previous.filter(item => item.root !== targetVersion.root)
+        ];
+        game.installation = targetVersion;
+        game.installedVersion = targetVersion.version || '';
+        game.installedVersionSource = targetVersion.version ? 'rollback' : '';
+        game.availability = { status: 'available', reason: '', checkedAt: Date.now() };
+      });
+      await store.log('Version rolled back', `${targetVersion.version || 'Previous version'} (${transferred.copied} save files transferred)`);
+      return { version: targetVersion.version || 'previous version', copiedSaves: transferred.copied };
+    } finally {
+      operations.delete(id);
+      notify();
+    }
   },
   'remove-version': async ({ id, root }) => {
     const game = getGame(id), version = retainedVersion(game, root);
@@ -950,6 +1017,41 @@ const actions = {
   'diagnostics-save': async () => {
     const result = await dialog.showSaveDialog(window, { title: 'Save diagnostics', defaultPath: 'AfterShelf-diagnostics.txt', filters: [{ name: 'Text', extensions: ['txt'] }] });
     if (!result.canceled) await fs.writeFile(result.filePath, store.diagnostic(app.getVersion(), process.platform, process.arch), 'utf8');
+  },
+  'copy-password': textValue => {
+    const password = text(textValue);
+    if (!password) throw new Error('No archive password is available to copy.');
+    clipboard.writeText(password);
+    return true;
+  },
+  'export-library': async () => {
+    const dateStamp = new Date().toISOString().slice(0, 10);
+    const result = await dialog.showSaveDialog(window, {
+      title: 'Export library file',
+      defaultPath: path.join(app.getPath('documents'), `AfterShelf-library-${dateStamp}.json`),
+      filters: [{ name: 'AfterShelf Library JSON', extensions: ['json'] }]
+    });
+    if (result.canceled || !result.filePath) return { exported: false };
+    const payload = exportLibraryPayload(store.snapshot());
+    await fs.writeFile(result.filePath, JSON.stringify(payload, null, 2), 'utf8');
+    await store.log('Library exported', `${payload.games.length} games`);
+    return { exported: true, count: payload.games.length };
+  },
+  'import-library': async () => {
+    const result = await dialog.showOpenDialog(window, {
+      title: 'Import library file',
+      defaultPath: app.getPath('documents'),
+      properties: ['openFile'],
+      filters: [{ name: 'AfterShelf Library JSON', extensions: ['json'] }]
+    });
+    if (result.canceled || !result.filePaths.length) return { imported: false };
+    const raw = await fs.readFile(result.filePaths[0], 'utf8');
+    let parsed;
+    try { parsed = JSON.parse(raw); } catch { throw new Error('The selected file is not valid JSON.'); }
+    let summary;
+    await store.update(state => { summary = importLibraryPayload(state, parsed); });
+    await store.log('Library imported', `${summary.added} added, ${summary.updated} updated`);
+    return { imported: true, ...summary };
   }
 };
 function scheduleChecks() {

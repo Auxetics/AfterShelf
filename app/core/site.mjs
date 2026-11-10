@@ -79,9 +79,12 @@ export function parseThread(html, url, origin) {
   content.find('script, style, template, noscript, iframe, button, form, blockquote, .bbCodeBlock--quote, .message-signature, .message-lastEdit, .bbCodeBlock-expandLink, .lb-container, .lightboxContainer, .fancybox-container').remove();
   const textBody = content.clone(); textBody.find('br').replaceWith('\n');
   textBody.find('p, div, li, h1, h2, h3, h4, tr').append('\n');
-  textBody.find('strong, b').each((_i, element) => { if (/^(?:overview|description|developer|creator|version|game version|engine|thread updated|release date|os|language|download|installation|changelog)\s*:/i.test($(element).text().trim())) $(element).before('\n'); });
+  textBody.find('strong, b').each((_i, element) => { if (/^(?:overview|description|developer|creator|version|game version|engine|thread updated|release date|os|language|download|installation|changelog|pass|password|archive password|zip password|rar password)\s*:/i.test($(element).text().trim())) $(element).before('\n'); });
   const body = textBody.text().replace(/\r/g, '').replace(/[ \t]+\n/g, '\n').slice(0, 100000);
   const fieldVersion = /(?:game\s+)?version\s*:\s*([^\n\r]+)/i.exec(body)?.[1]?.trim();
+  const rawPassword = /(?:^|\n)\s*(?:(?:archive|zip|rar|7z|extraction|file|download)\s+)?pass(?:word)?\s*:\s*([^\n\r]+)/i.exec(body)?.[1]?.trim() || '';
+  const cleanedPassword = rawPassword.replace(/^["'`]+|["'`]+$/g, '').trim().slice(0, 80);
+  const archivePassword = /^(?:none|no|n\/a|not required|-+)$/i.test(cleanedPassword) ? '' : cleanedPassword;
   const imageGroups = threadImages($, content, url);
   const coverCandidates = imageGroups.flat().slice(0, 12);
   const creatorField = /(?:developer|creator)\s*:\s*([^\n\r]+)/i.exec(body)?.[1]?.trim().slice(0, 200);
@@ -92,7 +95,7 @@ export function parseThread(html, url, origin) {
   return { ...ref, title: fullTitle.replace(/\[[^\]]*\]/g, '').trim() || fullTitle,
     latestVersion: versionFromTitle(fullTitle) || fieldVersion?.slice(0, 100) || '',
     engine: detectEngine(tags.join(' ') + ' ' + fullTitle + ' ' + engineField), tags: tags.slice(0, 50),
-    description: overview.replace(/\s+/g, ' ').trim().slice(0, 400), changelog: changelog.slice(0, 1800), creator, coverUrl: coverCandidates[0] || '', coverCandidates, imageGroups, metadataParserVersion: 2, checkedAt: Date.now() };
+    description: overview.replace(/\s+/g, ' ').trim().slice(0, 400), changelog: changelog.slice(0, 1800), creator, archivePassword, coverUrl: coverCandidates[0] || '', coverCandidates, imageGroups, metadataParserVersion: 2, checkedAt: Date.now() };
 }
 export function parseLatest(payload) {
   const rows = payload?.msg?.data || payload?.data;
